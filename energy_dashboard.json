@@ -267,7 +267,7 @@
         }
       ],
       "thresholds": "",
-      "title": "Electricity cost (units only)",
+      "title": "Go cost (units only)",
       "type": "singlestat",
       "valueFontSize": "80%",
       "valueMaps": [
@@ -380,7 +380,7 @@
         }
       ],
       "thresholds": "",
-      "title": "Electricity cost (total)",
+      "title": "Go cost (total)",
       "type": "singlestat",
       "valueFontSize": "80%",
       "valueMaps": [
@@ -493,7 +493,346 @@
         }
       ],
       "thresholds": "",
-      "title": "Electricity effective unit cost",
+      "title": "Go effective unit cost",
+      "type": "singlestat",
+      "valueFontSize": "80%",
+      "valueMaps": [
+        {
+          "op": "=",
+          "text": "N/A",
+          "value": "null"
+        }
+      ],
+      "valueName": "total"
+    },
+    {
+      "cacheTimeout": null,
+      "colorBackground": false,
+      "colorValue": false,
+      "colors": [
+        "#299c46",
+        "rgba(237, 129, 40, 0.89)",
+        "#d44a3a"
+      ],
+      "datasource": "${DS_INFLUX}",
+      "decimals": 2,
+      "format": "currencyGBP",
+      "gauge": {
+        "maxValue": 100,
+        "minValue": 0,
+        "show": false,
+        "thresholdLabels": false,
+        "thresholdMarkers": true
+      },
+      "gridPos": {
+        "h": 2,
+        "w": 6,
+        "x": 6,
+        "y": 2
+      },
+      "id": 17,
+      "interval": null,
+      "links": [],
+      "mappingType": 1,
+      "mappingTypes": [
+        {
+          "name": "value to text",
+          "value": 1
+        },
+        {
+          "name": "range to text",
+          "value": 2
+        }
+      ],
+      "maxDataPoints": 100,
+      "nullPointMode": "connected",
+      "nullText": null,
+      "postfix": "",
+      "postfixFontSize": "50%",
+      "prefix": "",
+      "prefixFontSize": "50%",
+      "rangeMaps": [
+        {
+          "from": "null",
+          "text": "N/A",
+          "to": "null"
+        }
+      ],
+      "sparkline": {
+        "fillColor": "rgba(31, 118, 189, 0.18)",
+        "full": false,
+        "lineColor": "rgb(31, 120, 193)",
+        "show": false
+      },
+      "tableColumn": "",
+      "targets": [
+        {
+          "groupBy": [
+            {
+              "params": [
+                "$__interval"
+              ],
+              "type": "time"
+            },
+            {
+              "params": [
+                "none"
+              ],
+              "type": "fill"
+            }
+          ],
+          "measurement": "electricity",
+          "orderByTime": "ASC",
+          "policy": "default",
+          "query": "SELECT sum(\"agile_cost\")/100 FROM \"electricity\" WHERE $timeFilter",
+          "rawQuery": true,
+          "refId": "A",
+          "resultFormat": "time_series",
+          "select": [
+            [
+              {
+                "params": [
+                  "cost"
+                ],
+                "type": "field"
+              },
+              {
+                "params": [],
+                "type": "sum"
+              }
+            ]
+          ],
+          "tags": []
+        }
+      ],
+      "thresholds": "",
+      "title": "Agile cost (units only)",
+      "type": "singlestat",
+      "valueFontSize": "80%",
+      "valueMaps": [
+        {
+          "op": "=",
+          "text": "N/A",
+          "value": "null"
+        }
+      ],
+      "valueName": "total"
+    },
+    {
+      "cacheTimeout": null,
+      "colorBackground": false,
+      "colorValue": false,
+      "colors": [
+        "#299c46",
+        "rgba(237, 129, 40, 0.89)",
+        "#d44a3a"
+      ],
+      "datasource": "${DS_INFLUX}",
+      "decimals": 2,
+      "format": "currencyGBP",
+      "gauge": {
+        "maxValue": 100,
+        "minValue": 0,
+        "show": false,
+        "thresholdLabels": false,
+        "thresholdMarkers": true
+      },
+      "gridPos": {
+        "h": 2,
+        "w": 6,
+        "x": 12,
+        "y": 2
+      },
+      "id": 18,
+      "interval": null,
+      "links": [],
+      "mappingType": 1,
+      "mappingTypes": [
+        {
+          "name": "value to text",
+          "value": 1
+        },
+        {
+          "name": "range to text",
+          "value": 2
+        }
+      ],
+      "maxDataPoints": 100,
+      "nullPointMode": "connected",
+      "nullText": null,
+      "postfix": "",
+      "postfixFontSize": "50%",
+      "prefix": "",
+      "prefixFontSize": "50%",
+      "rangeMaps": [
+        {
+          "from": "null",
+          "text": "N/A",
+          "to": "null"
+        }
+      ],
+      "sparkline": {
+        "fillColor": "rgba(31, 118, 189, 0.18)",
+        "full": false,
+        "lineColor": "rgb(31, 120, 193)",
+        "show": false
+      },
+      "tableColumn": "",
+      "targets": [
+        {
+          "groupBy": [
+            {
+              "params": [
+                "$__interval"
+              ],
+              "type": "time"
+            },
+            {
+              "params": [
+                "none"
+              ],
+              "type": "fill"
+            }
+          ],
+          "measurement": "electricity",
+          "orderByTime": "ASC",
+          "policy": "default",
+          "query": "SELECT sum(\"agile_total_cost\")/100 FROM \"electricity\" WHERE $timeFilter",
+          "rawQuery": true,
+          "refId": "A",
+          "resultFormat": "time_series",
+          "select": [
+            [
+              {
+                "params": [
+                  "cost"
+                ],
+                "type": "field"
+              },
+              {
+                "params": [],
+                "type": "sum"
+              }
+            ]
+          ],
+          "tags": []
+        }
+      ],
+      "thresholds": "",
+      "title": "Agile cost (total)",
+      "type": "singlestat",
+      "valueFontSize": "80%",
+      "valueMaps": [
+        {
+          "op": "=",
+          "text": "N/A",
+          "value": "null"
+        }
+      ],
+      "valueName": "total"
+    },
+    {
+      "cacheTimeout": null,
+      "colorBackground": false,
+      "colorValue": false,
+      "colors": [
+        "#299c46",
+        "rgba(237, 129, 40, 0.89)",
+        "#d44a3a"
+      ],
+      "datasource": "${DS_INFLUX}",
+      "decimals": 4,
+      "format": "currencyGBP",
+      "gauge": {
+        "maxValue": 100,
+        "minValue": 0,
+        "show": false,
+        "thresholdLabels": false,
+        "thresholdMarkers": true
+      },
+      "gridPos": {
+        "h": 2,
+        "w": 6,
+        "x": 18,
+        "y": 2
+      },
+      "id": 19,
+      "interval": null,
+      "links": [],
+      "mappingType": 1,
+      "mappingTypes": [
+        {
+          "name": "value to text",
+          "value": 1
+        },
+        {
+          "name": "range to text",
+          "value": 2
+        }
+      ],
+      "maxDataPoints": 100,
+      "nullPointMode": "connected",
+      "nullText": null,
+      "postfix": "",
+      "postfixFontSize": "50%",
+      "prefix": "",
+      "prefixFontSize": "50%",
+      "rangeMaps": [
+        {
+          "from": "null",
+          "text": "N/A",
+          "to": "null"
+        }
+      ],
+      "sparkline": {
+        "fillColor": "rgba(31, 118, 189, 0.18)",
+        "full": false,
+        "lineColor": "rgb(31, 120, 193)",
+        "show": false
+      },
+      "tableColumn": "",
+      "targets": [
+        {
+          "groupBy": [
+            {
+              "params": [
+                "$__interval"
+              ],
+              "type": "time"
+            },
+            {
+              "params": [
+                "none"
+              ],
+              "type": "fill"
+            }
+          ],
+          "measurement": "electricity",
+          "orderByTime": "ASC",
+          "policy": "default",
+          "query": "SELECT (sum(\"agile_total_cost\") / sum(\"consumption\"))/100 FROM \"electricity\" WHERE $timeFilter",
+          "rawQuery": true,
+          "refId": "A",
+          "resultFormat": "time_series",
+          "select": [
+            [
+              {
+                "params": [
+                  "cost"
+                ],
+                "type": "field"
+              },
+              {
+                "params": [],
+                "type": "sum"
+              }
+            ]
+          ],
+          "tags": []
+        }
+      ],
+      "thresholds": "",
+      "title": "Agile effective unit cost",
       "type": "singlestat",
       "valueFontSize": "80%",
       "valueMaps": [
@@ -516,7 +855,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 2
+        "y": 4
       },
       "id": 2,
       "legend": {
@@ -540,7 +879,12 @@
       "renderer": "flot",
       "seriesOverrides": [
         {
-          "alias": "Cost",
+          "alias": "Go cost",
+          "yaxis": 2,
+          "zindex": -1
+        },
+        {
+          "alias": "Agile cost",
           "yaxis": 2,
           "zindex": -1
         }
@@ -589,7 +933,7 @@
           "tags": []
         },
         {
-          "alias": "Cost",
+          "alias": "Go cost",
           "groupBy": [
             {
               "params": [
@@ -611,6 +955,46 @@
           "query": "SELECT mean(\"cost\")/100 FROM \"electricity\" WHERE $timeFilter GROUP BY time(30m) fill(linear)",
           "rawQuery": true,
           "refId": "B",
+          "resultFormat": "time_series",
+          "select": [
+            [
+              {
+                "params": [
+                  "cost"
+                ],
+                "type": "field"
+              },
+              {
+                "params": [],
+                "type": "mean"
+              }
+            ]
+          ],
+          "tags": []
+        },
+        {
+          "alias": "Agile cost",
+          "groupBy": [
+            {
+              "params": [
+                "$__interval"
+              ],
+              "type": "time"
+            },
+            {
+              "params": [
+                "linear"
+              ],
+              "type": "fill"
+            }
+          ],
+          "hide": false,
+          "measurement": "electricity",
+          "orderByTime": "ASC",
+          "policy": "default",
+          "query": "SELECT mean(\"agile_cost\")/100 FROM \"electricity\" WHERE $timeFilter GROUP BY time(30m) fill(linear)",
+          "rawQuery": true,
+          "refId": "C",
           "resultFormat": "time_series",
           "select": [
             [
@@ -657,7 +1041,7 @@
           "show": true
         },
         {
-          "decimals": null,
+          "decimals": 2,
           "format": "currencyGBP",
           "label": "Cost",
           "logBase": 1,
@@ -693,7 +1077,7 @@
         "h": 2,
         "w": 6,
         "x": 0,
-        "y": 11
+        "y": 13
       },
       "id": 7,
       "interval": null,
@@ -806,7 +1190,7 @@
         "h": 2,
         "w": 6,
         "x": 6,
-        "y": 11
+        "y": 13
       },
       "id": 11,
       "interval": null,
@@ -919,7 +1303,7 @@
         "h": 2,
         "w": 6,
         "x": 12,
-        "y": 11
+        "y": 13
       },
       "id": 13,
       "interval": null,
@@ -1032,7 +1416,7 @@
         "h": 2,
         "w": 6,
         "x": 18,
-        "y": 11
+        "y": 13
       },
       "id": 15,
       "interval": null,
@@ -1133,7 +1517,7 @@
         "h": 9,
         "w": 24,
         "x": 0,
-        "y": 13
+        "y": 15
       },
       "id": 8,
       "legend": {
@@ -1274,7 +1658,7 @@
           "show": true
         },
         {
-          "decimals": null,
+          "decimals": 2,
           "format": "currencyGBP",
           "label": "Cost",
           "logBase": 1,
@@ -1297,8 +1681,8 @@
     "list": []
   },
   "time": {
-    "from": "now-7d",
-    "to": "now"
+    "from": "now-8d",
+    "to": "now-1d"
   },
   "timepicker": {
     "refresh_intervals": [
@@ -1328,5 +1712,5 @@
   "timezone": "",
   "title": "Energy usage",
   "uid": "7Nqpoj-ik",
-  "version": 11
+  "version": 14
 }

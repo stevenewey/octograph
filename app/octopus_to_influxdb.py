@@ -9,7 +9,7 @@ import requests
 from influxdb import InfluxDBClient
 
 
-def retrieve_paginated_consumption(
+def retrieve_paginated_data(
         api_key, url, from_date, to_date, page=None
 ):
     args = {
@@ -25,13 +25,19 @@ def retrieve_paginated_consumption(
     if data['next']:
         url_query = parse.urlparse(data['next']).query
         next_page = parse.parse_qs(url_query)['page'][0]
-        results += retrieve_paginated_consumption(
+        results += retrieve_paginated_data(
             api_key, url, from_date, to_date, next_page
         )
     return results
 
 
 def store_series(connection, series, metrics, rate_data):
+
+    agile_data = rate_data.get('agile_unit_rates', [])
+    agile_rates = {
+        point['valid_to']: point['value_inc_vat']
+        for point in agile_data
+    }
 
     def active_rate_field(measurement):
         if series == 'gas':
@@ -65,11 +71,24 @@ def store_series(connection, series, metrics, rate_data):
         rate_cost = rate_data[rate]
         cost = consumption * rate_cost
         standing_charge = rate_data['standing_charge'] / 48  # 30 minute reads
-        return {
+        fields = {
             'consumption': consumption,
             'cost': cost,
             'total_cost': cost + standing_charge,
         }
+        if agile_data:
+            agile_standing_charge = rate_data['agile_standing_charge'] / 48
+            agile_unit_rate = agile_rates.get(
+                measurement['interval_end'],
+                rate_data[rate]  # cludge, use Go rate during DST changeover
+            )
+            agile_cost = agile_unit_rate * consumption
+            fields.update({
+                'agile_rate': agile_unit_rate,
+                'agile_cost': agile_cost,
+                'agile_total_cost': agile_cost + agile_standing_charge,
+            })
+        return fields
 
     def tags_for_measurement(measurement):
         period = maya.parse(measurement['interval_end'])
@@ -122,6 +141,7 @@ def cmd(config_file, from_date, to_date):
         raise click.ClickException('No electricity meter identifiers')
     e_url = 'https://api.octopus.energy/v1/electricity-meter-points/' \
             f'{e_mpan}/meters/{e_serial}/consumption/'
+    agile_url = config.get('electricity', 'agile_rate_url', fallback=None)
 
     g_mpan = config.get('gas', 'mpan', fallback=None)
     g_serial = config.get('gas', 'serial_number', fallback=None)
@@ -150,6 +170,10 @@ def cmd(config_file, from_date, to_date):
             'unit_rate_low_zone': config.get(
                 'electricity', 'unit_rate_low_zone', fallback=None
             ),
+            'agile_standing_charge': config.getfloat(
+                'electricity', 'agile_standing_charge', fallback=0.0
+            ),
+            'agile_unit_rates': [],
         },
         'gas': {
             'standing_charge': config.getfloat(
@@ -166,17 +190,25 @@ def cmd(config_file, from_date, to_date):
         f'Retrieving electricity data for {from_iso} until {to_iso}...',
         nl=False
     )
-    e_consumption = retrieve_paginated_consumption(
+    e_consumption = retrieve_paginated_data(
         api_key, e_url, from_iso, to_iso
     )
     click.echo(f' {len(e_consumption)} readings.')
+    click.echo(
+        f'Retrieving Agile rates for {from_iso} until {to_iso}...',
+        nl=False
+    )
+    rate_data['electricity']['agile_unit_rates'] = retrieve_paginated_data(
+        api_key, agile_url, from_iso, to_iso
+    )
+    click.echo(f' {len(rate_data["electricity"]["agile_unit_rates"])} rates.')
     store_series(influx, 'electricity', e_consumption, rate_data['electricity'])
 
     click.echo(
         f'Retrieving gas data for {from_iso} until {to_iso}...',
         nl=False
     )
-    g_consumption = retrieve_paginated_consumption(
+    g_consumption = retrieve_paginated_data(
         api_key, g_url, from_iso, to_iso
     )
     click.echo(f' {len(g_consumption)} readings.')
