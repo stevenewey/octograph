@@ -4,6 +4,10 @@ Octograph
 Python tool for downloading energy consumption data from the
 `Octopus Energy API`_ and loading it into `InfluxDB`_.
 
+If you think you'd find this useful, but haven't switched to Octopus yet, then
+you can follow my referrer link `<https://share.octopus.energy/vivid-emu-468>`_
+and you'll receive a £50 bill credit, and so will I :)
+
 In the process, additional metrics will be generated and stored for unit rates
 and costs as configured by the user. Suitable for two-rate electricity tariffs
 like `Octopus Energy Go`_. Single rate gas readings are also retrieved and
