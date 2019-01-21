@@ -57,7 +57,7 @@ that the script will be run daily by a cron job.
 .. code:: bash
 
     docker-compose up -d  # start InfluxDB and Grafana in Docker
-    python app/octopus_to_infuxdb.py --from-date=2018-10-20
+    python app/octopus_to_influxdb.py --from-date=2018-10-20
     open http://localhost:3000
 
 The default login credentials for Grafana are admin/admin, and you will be
