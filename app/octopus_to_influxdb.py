@@ -52,11 +52,15 @@ def store_series(connection, series, metrics, rate_data):
         measurement_at = maya.parse(measurement['interval_start'])
 
         low_start = maya.when(
-            measurement_at.datetime().strftime(f'%Y-%m-%dT{low_start_str}'),
+            measurement_at.datetime(to_timezone=low_zone).strftime(
+                f'%Y-%m-%dT{low_start_str}'
+            ),
             timezone=low_zone
         )
         low_end = maya.when(
-            measurement_at.datetime().strftime(f'%Y-%m-%dT{low_end_str}'),
+            measurement_at.datetime(to_timezone=low_zone).strftime(
+                f'%Y-%m-%dT{low_end_str}'
+            ),
             timezone=low_zone
         )
         low_period = maya.MayaInterval(low_start, low_end)
@@ -150,6 +154,8 @@ def cmd(config_file, from_date, to_date):
     g_url = 'https://api.octopus.energy/v1/gas-meter-points/' \
             f'{g_mpan}/meters/{g_serial}/consumption/'
 
+    timezone = config.get('electricity', 'unit_rate_low_zone', fallback=None)
+
     rate_data = {
         'electricity': {
             'standing_charge': config.getfloat(
@@ -167,9 +173,7 @@ def cmd(config_file, from_date, to_date):
             'unit_rate_low_end': config.get(
                 'electricity', 'unit_rate_low_end', fallback="00:00"
             ),
-            'unit_rate_low_zone': config.get(
-                'electricity', 'unit_rate_low_zone', fallback=None
-            ),
+            'unit_rate_low_zone': timezone,
             'agile_standing_charge': config.getfloat(
                 'electricity', 'agile_standing_charge', fallback=0.0
             ),
@@ -183,8 +187,8 @@ def cmd(config_file, from_date, to_date):
         }
     }
 
-    from_iso = maya.when(from_date).iso8601()
-    to_iso = maya.when(to_date).iso8601()
+    from_iso = maya.when(from_date, timezone=timezone).iso8601()
+    to_iso = maya.when(to_date, timezone=timezone).iso8601()
 
     click.echo(
         f'Retrieving electricity data for {from_iso} until {to_iso}...',
