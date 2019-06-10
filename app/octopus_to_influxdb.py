@@ -79,7 +79,7 @@ def store_series(connection, series, metrics, rate_data):
         if agile_data:
             agile_standing_charge = rate_data['agile_standing_charge'] / 48
             agile_unit_rate = agile_rates.get(
-                measurement['interval_end'],
+                maya.parse(measurement['interval_end']).iso8601(),
                 rate_data[rate]  # cludge, use Go rate during DST changeover
             )
             agile_cost = agile_unit_rate * consumption
