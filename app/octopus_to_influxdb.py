@@ -71,6 +71,9 @@ def store_series(connection, series, metrics, rate_data):
 
     def fields_for_measurement(measurement):
         consumption = measurement['consumption']
+        conversion_factor = rate_data.get('conversion_factor', None)
+        if conversion_factor:
+            consumption *= conversion_factor
         rate = active_rate_field(measurement)
         rate_cost = rate_data[rate]
         cost = consumption * rate_cost
@@ -149,6 +152,9 @@ def cmd(config_file, from_date, to_date):
 
     g_mpan = config.get('gas', 'mpan', fallback=None)
     g_serial = config.get('gas', 'serial_number', fallback=None)
+    g_meter_type = config.get('gas', 'meter_type', fallback=1)
+    g_vcf = config.get('gas', 'volume_correction_factor', fallback=1.02264)
+    g_cv = config.get('gas', 'calorific_value', fallback=40)
     if not g_mpan or not g_serial:
         raise click.ClickException('No gas meter identifiers')
     g_url = 'https://api.octopus.energy/v1/gas-meter-points/' \
@@ -184,6 +190,8 @@ def cmd(config_file, from_date, to_date):
                 'gas', 'standing_charge', fallback=0.0
             ),
             'unit_rate': config.getfloat('gas', 'unit_rate', fallback=0.0),
+            # SMETS1 meters report kWh, SMET2 report m^3 and need converting to kWh first
+            'conversion_factor': (float(g_vcf) * float(g_cv)) / 3.6 if int(g_meter_type) > 1 else None,
         }
     }
 
