@@ -2,12 +2,18 @@ version: '3'
 services:
   influxdb:
     image: influxdb
+    container_name: octo-influxdb
+    volumes:
+      - "./data/influxdb/:/var/lib/influxdb"    
     environment:
       - INFLUXDB_DB=energy
     ports:
       - "8086:8086"
   grafana:
     image: grafana/grafana
+    container_name: octo-grafana
+    volumes: 
+      - "./grafana/provisioning:/etc/grafana/provisioning"
     ports:
       - "3000:3000"
     depends_on:

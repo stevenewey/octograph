@@ -1,0 +1,11 @@
+apiVersion: 1
+
+deleteDatasources:
+  - name: InfluxDB
+
+datasources:
+  - name: InfluxDB
+    type: influxdb
+    access: proxy
+    database: energy
+    url: http://influxdb:8086

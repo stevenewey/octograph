@@ -54,11 +54,6 @@ By default, energy data for the previous day will be collected. Optional from
 and to ranges may be specified to retrieve larger datasets. It is anticipated
 that the script will be run daily by a cron job.
 
-.. code:: bash
-
-    docker-compose up -d  # start InfluxDB and Grafana in Docker
-    python app/octopus_to_influxdb.py --from-date=2018-10-20
-    open http://localhost:3000
 
 The default login credentials for Grafana are admin/admin, and you will be
 prompted to set a new password on first login. You should then proceed to add
@@ -66,6 +61,35 @@ InfluxDB as a datasource with URL ``http://influxdb:8086`` and database
 ``energy`` if using the Docker version provided. The dashboard provided can
 then be imported to review the data.
 
+
+Running on host
+====
+
+.. code:: bash
+
+    docker-compose up -d  # start InfluxDB and Grafana in Docker
+    python app/octopus_to_influxdb.py --from-date=2018-10-20
+    open http://localhost:3000
+
+Running on docker
+====
+
+You can also run octopgrah using the Dockerfile within the `app` directory.
+The only difference between from the script above is that no local installation
+is required just mount the config file into docker, ensuring the path to your 
+local `ini` file is correct and run the docker command.
+
+.. code:: bash
+
+    docker-compose up -d # start InfluxDB and Grafana in Docker
+    docker build ./app -t octograph # build the docker image, only needs done first time or whenever you update the repository
+    docker run --volume=`pwd`/octograph.ini:/usr/src/app/octograph.ini --network="container:octo-influxdb" octograph --from-date=2018-10-20 # run octograph using the same network as influxdb
+    open http://localhost:3000
+
+Links
+====
+
+Some useful links for the tech involved are included below
 
 .. _Octopus Energy API: https://developer.octopus.energy/docs/api/
 .. _Octopus Energy Go: https://octopus.energy/go/
