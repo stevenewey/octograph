@@ -54,11 +54,27 @@ By default, energy data for the previous day will be collected. Optional from
 and to ranges may be specified to retrieve larger datasets. It is anticipated
 that the script will be run daily by a cron job.
 
+Running on host
+====
+
 .. code:: bash
 
     docker-compose up -d  # start InfluxDB and Grafana in Docker
     python app/octopus_to_influxdb.py --from-date=2018-10-20
     open http://localhost:3000
+
+Running on docker
+====
+
+.. code::bash
+    docker-compose up -d # start InfluxDB and Grafana in Docker
+    docker build ./app -t octograph # build the docker image, only needs done first time or whenever you update the repository
+    docker run \
+	--volume=`pwd`/octograph.ini:/usr/src/app/octograph.ini \ # mount your ini file into the appropriate place in the container
+	--network="container:influxdb" \ # use the same network as the InfluxDB container
+	octograph --from-date=2018-10-20
+    open http://localhost:3000
+
 
 The default login credentials for Grafana are admin/admin, and you will be
 prompted to set a new password on first login. You should then proceed to add
