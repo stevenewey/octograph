@@ -86,8 +86,10 @@ local `ini` file is correct and run the docker command.
     docker run --volume=`pwd`/octograph.ini:/usr/src/app/octograph.ini --network="container:octo-influxdb" octograph --from-date=2018-10-20 # run octograph using the same network as influxdb
     open http://localhost:3000
 
+Links
+====
 
-
+Some useful links for the tech involved are included below
 
 .. _Octopus Energy API: https://developer.octopus.energy/docs/api/
 .. _Octopus Energy Go: https://octopus.energy/go/
