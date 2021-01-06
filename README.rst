@@ -66,13 +66,15 @@ Running on host
 Running on docker
 ====
 
+You can also run octopgrah using the Dockerfile within the `app` directory.
+The only difference between from the script above is that no local installation
+is required just mount the config file into docker, ensuring the path to your 
+local `ini` file is correct and run the docker command.
+
 .. code::bash
     docker-compose up -d # start InfluxDB and Grafana in Docker
     docker build ./app -t octograph # build the docker image, only needs done first time or whenever you update the repository
-    docker run \
-	--volume=`pwd`/octograph.ini:/usr/src/app/octograph.ini \ # mount your ini file into the appropriate place in the container
-	--network="container:influxdb" \ # use the same network as the InfluxDB container
-	octograph --from-date=2018-10-20
+    docker run --volume=`pwd`/octograph.ini:/usr/src/app/octograph.ini --network="container:octo-influxdb" octograph --from-date=2018-10-20 # run octograph using the same network as influxdb
     open http://localhost:3000
 
 

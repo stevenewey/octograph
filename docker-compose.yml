@@ -2,6 +2,7 @@ version: '3'
 services:
   influxdb:
     image: influxdb
+    container_name: octo-influxdb
     environment:
       - INFLUXDB_DB=energy
     ports:
