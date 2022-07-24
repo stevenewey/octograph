@@ -63,10 +63,27 @@ def store_series(connection, series, metrics, rate_data):
             ),
             timezone=low_zone
         )
-        low_period = maya.MayaInterval(low_start, low_end)
-
+        if low_start > low_end:
+            # end time is the following day
+            low_end_d1 = maya.when(
+                measurement_at.datetime(to_timezone=low_zone).strftime(
+                    f'%Y-%m-%dT23:59:59'
+                ),
+                timezone=low_zone
+            )
+            low_start_d2 = maya.when(
+                measurement_at.datetime(to_timezone=low_zone).strftime(
+                    f'%Y-%m-%dT00:00:00'
+                ),
+                timezone=low_zone
+            )
+            low_period_a = maya.MayaInterval(low_start, low_end_d1)
+            low_period_b = maya.MayaInterval(low_start_d2, low_end)
+        else:
+            low_period_a = low_period_b = maya.MayaInterval(low_start, low_end)
         return \
-            'unit_rate_low' if measurement_at in low_period \
+            'unit_rate_low' if measurement_at in low_period_a \
+                or measurement_at in low_period_b \
             else 'unit_rate_high'
 
     def fields_for_measurement(measurement):
