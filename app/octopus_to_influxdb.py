@@ -30,9 +30,15 @@ def retrieve_paginated_data(
         )
     return results
 
+# GET /v1/products/{product_code}/electricity-tariffs/{tariff_code}/standing-charges/
+# GET GET /v1/products/{product_code}/gas-tariffs/{tariff_code}/standing-charges/
+def retrieve_standing_charges(api_key, url):
+    response = requests.get(url, params=args, auth=(api_key, ''))
+    response.raise_for_status()
+    data = response.json()
 
-def store_series(connection, series, metrics, rate_data):
 
+def store_series(connection, series, metrics, rate_data, additional_tags):
     agile_data = rate_data.get('agile_unit_rates', [])
     agile_rates = {
         point['valid_to']: point['value_inc_vat']
@@ -83,8 +89,8 @@ def store_series(connection, series, metrics, rate_data):
             low_period_a = low_period_b = maya.MayaInterval(low_start, low_end)
         return \
             'unit_rate_low' if measurement_at in low_period_a \
-                or measurement_at in low_period_b \
-            else 'unit_rate_high'
+                               or measurement_at in low_period_b \
+                else 'unit_rate_high'
 
     def fields_for_measurement(measurement):
         consumption = measurement['consumption']
@@ -125,13 +131,13 @@ def store_series(connection, series, metrics, rate_data):
     measurements = [
         {
             'measurement': series,
-            'tags': tags_for_measurement(measurement),
+            'tags': tags_for_measurement(measurement) | additional_tags,
             'time': measurement['interval_end'],
             'fields': fields_for_measurement(measurement),
         }
         for measurement in metrics
     ]
-    connection.write_points(measurements)
+    # connection.write_points(measurements)
 
 
 @click.command()
@@ -143,7 +149,6 @@ def store_series(connection, series, metrics, rate_data):
 @click.option('--from-date', default='yesterday midnight', type=click.STRING)
 @click.option('--to-date', default='today midnight', type=click.STRING)
 def cmd(config_file, from_date, to_date):
-
     config = ConfigParser()
     config.read(config_file)
 
@@ -154,94 +159,117 @@ def cmd(config_file, from_date, to_date):
         password=config.get('influxdb', 'password', fallback=""),
         database=config.get('influxdb', 'database', fallback="energy"),
     )
+    include_mpan_tag = config.getboolean('influxdb', 'include_mpan_tag', fallback=False)
+    include_serial_number_tag = config.getboolean('influxdb', 'include_serial_number_tag', fallback=False)
+    additional_tags_str = config.get('influxdb', 'additional_tags', fallback=None)
+    additional_tags = {}
+    if additional_tags_str:
+        additional_tags |= dict(item.split("=") for item in additional_tags_str.split(","))
 
     api_key = config.get('octopus', 'api_key')
     if not api_key:
         raise click.ClickException('No Octopus API key set')
 
-    e_mpan = config.get('electricity', 'mpan', fallback=None)
-    e_serial = config.get('electricity', 'serial_number', fallback=None)
-    if not e_mpan or not e_serial:
-        raise click.ClickException('No electricity meter identifiers')
-    e_url = 'https://api.octopus.energy/v1/electricity-meter-points/' \
-            f'{e_mpan}/meters/{e_serial}/consumption/'
-    agile_url = config.get('electricity', 'agile_rate_url', fallback=None)
-
-    g_mpan = config.get('gas', 'mpan', fallback=None)
-    g_serial = config.get('gas', 'serial_number', fallback=None)
-    g_meter_type = config.get('gas', 'meter_type', fallback=1)
-    g_vcf = config.get('gas', 'volume_correction_factor', fallback=1.02264)
-    g_cv = config.get('gas', 'calorific_value', fallback=40)
-    if not g_mpan or not g_serial:
-        raise click.ClickException('No gas meter identifiers')
-    g_url = 'https://api.octopus.energy/v1/gas-meter-points/' \
-            f'{g_mpan}/meters/{g_serial}/consumption/'
-
+    e_enabled = config.getboolean('electricity', 'enabled', fallback=True)
+    g_enabled = config.getboolean('electricity', 'enabled', fallback=True)
     timezone = config.get('electricity', 'unit_rate_low_zone', fallback=None)
-
-    rate_data = {
-        'electricity': {
-            'standing_charge': config.getfloat(
-                'electricity', 'standing_charge', fallback=0.0
-            ),
-            'unit_rate_high': config.getfloat(
-                'electricity', 'unit_rate_high', fallback=0.0
-            ),
-            'unit_rate_low': config.getfloat(
-                'electricity', 'unit_rate_low', fallback=0.0
-            ),
-            'unit_rate_low_start': config.get(
-                'electricity', 'unit_rate_low_start', fallback="00:00"
-            ),
-            'unit_rate_low_end': config.get(
-                'electricity', 'unit_rate_low_end', fallback="00:00"
-            ),
-            'unit_rate_low_zone': timezone,
-            'agile_standing_charge': config.getfloat(
-                'electricity', 'agile_standing_charge', fallback=0.0
-            ),
-            'agile_unit_rates': [],
-        },
-        'gas': {
-            'standing_charge': config.getfloat(
-                'gas', 'standing_charge', fallback=0.0
-            ),
-            'unit_rate': config.getfloat('gas', 'unit_rate', fallback=0.0),
-            # SMETS1 meters report kWh, SMET2 report m^3 and need converting to kWh first
-            'conversion_factor': (float(g_vcf) * float(g_cv)) / 3.6 if int(g_meter_type) > 1 else None,
-        }
-    }
-
     from_iso = maya.when(from_date, timezone=timezone).iso8601()
     to_iso = maya.when(to_date, timezone=timezone).iso8601()
+    rate_data = {}
 
-    click.echo(
-        f'Retrieving electricity data for {from_iso} until {to_iso}...',
-        nl=False
-    )
-    e_consumption = retrieve_paginated_data(
-        api_key, e_url, from_iso, to_iso
-    )
-    click.echo(f' {len(e_consumption)} readings.')
-    click.echo(
-        f'Retrieving Agile rates for {from_iso} until {to_iso}...',
-        nl=False
-    )
-    rate_data['electricity']['agile_unit_rates'] = retrieve_paginated_data(
-        api_key, agile_url, from_iso, to_iso
-    )
-    click.echo(f' {len(rate_data["electricity"]["agile_unit_rates"])} rates.')
-    store_series(influx, 'electricity', e_consumption, rate_data['electricity'])
+    if e_enabled:
+        e_mpan = config.get('electricity', 'mpan', fallback=None)
+        e_serial = config.get('electricity', 'serial_number', fallback=None)
+        if not e_mpan or not e_serial:
+            raise click.ClickException('No electricity meter identifiers')
+        e_url = 'https://api.octopus.energy/v1/electricity-meter-points/' \
+                f'{e_mpan}/meters/{e_serial}/consumption/'
+        agile_url = config.get('electricity', 'agile_rate_url', fallback=None)
+        rate_data |= {
+            'electricity': {
+                'standing_charge': config.getfloat(
+                    'electricity', 'standing_charge', fallback=0.0
+                ),
+                'unit_rate_high': config.getfloat(
+                    'electricity', 'unit_rate_high', fallback=0.0
+                ),
+                'unit_rate_low': config.getfloat(
+                    'electricity', 'unit_rate_low', fallback=0.0
+                ),
+                'unit_rate_low_start': config.get(
+                    'electricity', 'unit_rate_low_start', fallback="00:00"
+                ),
+                'unit_rate_low_end': config.get(
+                    'electricity', 'unit_rate_low_end', fallback="00:00"
+                ),
+                'unit_rate_low_zone': timezone,
+                'agile_standing_charge': config.getfloat(
+                    'electricity', 'agile_standing_charge', fallback=0.0
+                ),
+                'agile_unit_rates': [],
+            },
+        }
+        click.echo(
+            f'Retrieving electricity data for {from_iso} until {to_iso}...',
+            nl=False
+        )
+        e_consumption = retrieve_paginated_data(
+            api_key, e_url, from_iso, to_iso
+        )
+        click.echo(f' {len(e_consumption)} readings.')
+        click.echo(
+            f'Retrieving Agile rates for {from_iso} until {to_iso}...',
+            nl=False
+        )
+        rate_data['electricity']['agile_unit_rates'] = retrieve_paginated_data(
+            api_key, agile_url, from_iso, to_iso
+        )
+        click.echo(f' {len(rate_data["electricity"]["agile_unit_rates"])} rates.')
+        tags = additional_tags.copy()
+        if include_mpan_tag:
+            tags |= {'mpan': e_mpan}
+        if include_serial_number_tag:
+            tags |= {'serial_number': e_serial}
+        store_series(influx, 'electricity', e_consumption, rate_data['electricity'], tags)
+    else:
+        click.echo('Electricity is disabled')
 
-    click.echo(
-        f'Retrieving gas data for {from_iso} until {to_iso}...',
-        nl=False
-    )
-    g_consumption = retrieve_paginated_data(
-        api_key, g_url, from_iso, to_iso
-    )
-    click.echo(f' {len(g_consumption)} readings.')
-    store_series(influx, 'gas', g_consumption, rate_data['gas'])
+    if g_enabled:
+        g_mpan = config.get('gas', 'mpan', fallback=None)
+        g_serial = config.get('gas', 'serial_number', fallback=None)
+        g_meter_type = config.get('gas', 'meter_type', fallback=1)
+        g_vcf = config.get('gas', 'volume_correction_factor', fallback=1.02264)
+        g_cv = config.get('gas', 'calorific_value', fallback=40)
+        if not g_mpan or not g_serial:
+            raise click.ClickException('No gas meter identifiers')
+        g_url = 'https://api.octopus.energy/v1/gas-meter-points/' \
+                f'{g_mpan}/meters/{g_serial}/consumption/'
+        rate_data |= {
+            'gas': {
+                'standing_charge': config.getfloat(
+                    'gas', 'standing_charge', fallback=0.0
+                ),
+                'unit_rate': config.getfloat('gas', 'unit_rate', fallback=0.0),
+                # SMETS1 meters report kWh, SMET2 report m^3 and need converting to kWh first
+                'conversion_factor': (float(g_vcf) * float(g_cv)) / 3.6 if int(g_meter_type) > 1 else None,
+            }
+        }
+        click.echo(
+            f'Retrieving gas data for {from_iso} until {to_iso}...',
+            nl=False
+        )
+        g_consumption = retrieve_paginated_data(
+            api_key, g_url, from_iso, to_iso
+        )
+        click.echo(f' {len(g_consumption)} readings.')
+        tags = additional_tags.copy()
+        if include_mpan_tag:
+            tags |= {'mpan': g_mpan}
+        if include_serial_number_tag:
+            tags |= {'serial_number': g_serial}
+        store_series(influx, 'gas', g_consumption, rate_data['gas'], tags)
+    else:
+        click.echo('Gas is disabled')
 
 
 if __name__ == '__main__':
