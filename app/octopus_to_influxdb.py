@@ -128,31 +128,39 @@ class OctopusApiClient:
         response.raise_for_status()
         return response.json()
 
-    def _retrieve_paginated_data(self, url: str, from_date: str, to_date: str, page: str = None):
+    def _retrieve_paginated_data(self, path: str, from_date: str, to_date: str, page: str = None):
+        page_size = 25000 if '/consumption/' in path else 1500
         args = {
             'period_from': from_date,
             'period_to': to_date,
+            'page_size': page_size,
         }
         if page:
             args['page'] = page
-        data = self._retrieve_data(url, args)
+        data = self._retrieve_data(path, args)
         results = data.get('results', [])
         if data['next']:
             url_query = parse.urlparse(data['next']).query
             next_page = parse.parse_qs(url_query)['page'][0]
-            results += self._retrieve_paginated_data(url, from_date, to_date, next_page)
+            results += self._retrieve_paginated_data(path, from_date, to_date, next_page)
         return results
 
     def retrieve_account(self, account_number: str):
         return self._retrieve_data(f'accounts/{account_number}/')
 
-    def retrieve_standing_charges(self, api_prefix: str, api_key: str, tariff_code: str):
+    def _retrieve_tariff_charges(self, tariff_code: str, charges: str, from_date: str, to_date: str):
         utility = 'electricity' if tariff_code.startswith('E') else 'gas' if tariff_code.startswith('G') else None
         if not utility:
             raise click.ClickException(f'Tariff code is not electricity or gas: {tariff_code}')
         product_code = '-'.join(tariff_code.split('-')[2:6])
-        path = f'products/{product_code}/{utility}-tariffs/{tariff_code}/standing-charges/'
-        return self._retrieve_data(path)
+        path = f'products/{product_code}/{utility}-tariffs/{tariff_code}/{charges}/'
+        return self._retrieve_paginated_data(path, from_date, to_date)
+
+    def retrieve_standing_charges(self, tariff_code: str, from_date: str, to_date: str):
+        return self._retrieve_tariff_charges(tariff_code, 'standing-charges', from_date, to_date)
+
+    def retrieve_unit_rates(self, tariff_code: str, from_date: str, to_date: str):
+        return self._retrieve_tariff_charges(tariff_code, 'standard-unit-rates', from_date, to_date)
 
 
 class OctopusToInflux:
@@ -204,7 +212,7 @@ class OctopusToInflux:
         tags = base_tags.copy()
         click.echo(f'Processing property: {p["address_line_1"]}, {p["postcode"]}')
         for field in ['address_line_1', 'address_line_2', 'address_line_3', 'town', 'postcode']:
-            if field in self._included_tags:
+            if f'property_{field}' in self._included_tags:
                 tags[f'property_{field}'] = p[field]
         if len(p['electricity_meter_points']) == 0:
             click.echo('No electricity meter points found in property')
@@ -224,9 +232,9 @@ class OctopusToInflux:
             if self._included_meters and em['serial_number'] not in self._included_meters:
                 click.echo(f'Skipping electricity meter {em['serial_number']} as it is not in octopus.included_meters')
             else:
-                self._process_em(em, tags)
+                self._process_em(em, emp['agreements'], tags)
 
-    def _process_em(self, em, base_tags: dict[str, str]):
+    def _process_em(self, em, agreements, base_tags: dict[str, str]):
         tags = base_tags.copy()
         click.echo(f'Processing electricity meter: {em["serial_number"]}')
         if 'meter_serial_number' in self._included_tags:
@@ -250,6 +258,7 @@ class OctopusToInflux:
         if 'meter_serial_number' in self._included_tags:
             tags['meter_serial_number'] = gm["serial_number"]
         click.echo(f'TAGS: {tags}')
+
 
 @click.command()
 @click.option(
