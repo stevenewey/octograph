@@ -184,44 +184,72 @@ class OctopusToInflux:
         included_meters_str = config.get('octopus', 'included_meters', fallback=None)
         self._included_meters = included_meters_str.split(',') if included_meters_str else None
 
+        included_tags_str = config.get('influxdb', 'included_tags', fallback=None)
+        self._included_tags = included_tags_str.split(',') if included_tags_str else []
+
+        additional_tags_str = config.get('influxdb', 'additional_tags', fallback=None)
+        self._additional_tags = dict(item.split('=') for item in additional_tags_str.split(',')) if additional_tags_str else {}
+
     def run(self):
         account = self._octopus_api.retrieve_account(self._account_number)
-        for p in account['properties']:
-            self._process_property(p)
+        tags = {}
+        tags |= self._additional_tags
+        if 'account_number' in self._included_tags:
+            tags['account_number'] = account['number']
 
-    def _process_property(self, p):
+        for p in account['properties']:
+            self._process_property(p, tags)
+
+    def _process_property(self, p, base_tags: dict[str, str]):
+        tags = base_tags.copy()
         click.echo(f'Processing property: {p["address_line_1"]}, {p["postcode"]}')
+        for field in ['address_line_1', 'address_line_2', 'address_line_3', 'town', 'postcode']:
+            if field in self._included_tags:
+                tags[f'property_{field}'] = p[field]
         if len(p['electricity_meter_points']) == 0:
             click.echo('No electricity meter points found in property')
         for emp in p['electricity_meter_points']:
-            self._process_emp(emp)
+            self._process_emp(emp, tags)
         if len(p['gas_meter_points']) == 0:
             click.echo('No gas meter points found in property')
         for emp in p['gas_meter_points']:
-            self._process_gmp(emp)
+            self._process_gmp(emp, tags)
 
-    def _process_emp(self, emp):
+    def _process_emp(self, emp, base_tags: dict[str, str]):
+        tags = base_tags.copy()
         click.echo(f'Processing electricity meter point: {emp["mpan"]}')
+        if 'electricity_mpan' in self._included_tags:
+            tags['electricity_mpan'] = emp["mpan"]
         for em in emp['meters']:
             if self._included_meters and em['serial_number'] not in self._included_meters:
-                click.echo(f'Skipping electricity meter {emp["mpan"]} as it is not in octopus.included_meters')
+                click.echo(f'Skipping electricity meter {em['serial_number']} as it is not in octopus.included_meters')
             else:
-                self._process_em(em)
+                self._process_em(em, tags)
 
-    def _process_em(self, em):
+    def _process_em(self, em, base_tags: dict[str, str]):
+        tags = base_tags.copy()
         click.echo(f'Processing electricity meter: {em["serial_number"]}')
+        if 'meter_serial_number' in self._included_tags:
+            tags['meter_serial_number'] = em["serial_number"]
+        click.echo(f'TAGS: {tags}')
 
-    def _process_gmp(self, gmp):
+    def _process_gmp(self, gmp, base_tags: dict[str, str]):
+        tags = base_tags.copy()
         click.echo(f'Processing gas meter point: {gmp["mprn"]}')
+        if 'gas_mprn' in self._included_tags:
+            tags['gas_mprn'] = gmp["mprn"]
         for gm in gmp['meters']:
             if self._included_meters and gm['serial_number'] not in self._included_meters:
-                click.echo(f'Skipping gas meter {gmp["mprn"]} as it is not in octopus.included_meters')
+                click.echo(f'Skipping gas meter {gm['serial_number']} as it is not in octopus.included_meters')
             else:
-                self._process_gm(gm)
+                self._process_gm(gm, tags)
 
-    def _process_gm(self, gm):
+    def _process_gm(self, gm, base_tags: dict[str, str]):
+        tags = base_tags.copy()
         click.echo(f'Processing gas meter: {gm["serial_number"]}')
-
+        if 'meter_serial_number' in self._included_tags:
+            tags['meter_serial_number'] = gm["serial_number"]
+        click.echo(f'TAGS: {tags}')
 
 @click.command()
 @click.option(
