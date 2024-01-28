@@ -203,8 +203,11 @@ class OctopusToInflux:
 
         timezone = config.get('octopus', 'timezone', fallback=None)
         self._payment_method = config.get('octopus', 'payment_method', fallback='DIRECT_DEBIT')
+        # TODO: Decide if we want timezone to apply here
         self._from = maya.when(from_date, timezone=timezone)
         self._to = maya.when(to_date, timezone=timezone)
+        self._unit_rate_low_start = config.getint('octopus', 'unit_rate_low_start', fallback=1)
+        self._unit_rate_low_end = config.getint('octopus', 'unit_rate_low_end', fallback=8)
 
         included_meters_str = config.get('octopus', 'included_meters', fallback=None)
         self._included_meters = included_meters_str.split(',') if included_meters_str else None
@@ -245,14 +248,29 @@ class OctopusToInflux:
         click.echo(f'Processing electricity meter point: {emp["mpan"]}')
         if 'electricity_mpan' in self._included_tags:
             tags['electricity_mpan'] = emp["mpan"]
-        pricing = self._get_pricing(emp['agreements'])
-        tsv_output = StringIO()
-        tsv_writer = csv.DictWriter(tsv_output, fieldnames=pricing[0].keys(), delimiter='\t')
-        tsv_writer.writeheader()
-        tsv_writer.writerows(pricing)
-        tsv_string = tsv_output.getvalue()
-        click.echo(tsv_string)
-        tsv_output.close()
+        pricing_dict = self._get_pricing(emp['agreements'])
+        standard_unit_rows = []
+        if 'day_unit_rates' in pricing_dict and 'night_unit_rates' in pricing_dict:
+            standard_unit_rows + self.convert_to_standard_unit_rates(pricing_dict['day_unit_rates'], pricing_dict['night_unit_rates'])
+        if 'standard_unit_rates' in pricing_dict:
+            standard_unit_rows += pricing_dict['standard_unit_rates']
+            pass
+        standard_unit_rates = self._fill_single_series(standard_unit_rows)
+        if 'standing_charges' in pricing_dict:
+            standing_charges = self._fill_single_series(pricing_dict['standing_charges'])
+        else:
+            click.echo(f'Could not find pricing for mpan: {emp["mpan"]}')
+            standing_charges = {}
+        for component, pricing in {'standard_unit_rates': standard_unit_rates, 'standing_charges': standing_charges}.items():
+            click.echo(f'*** {component} ***')
+            tsv_output = StringIO()
+            tsv_writer = csv.DictWriter(tsv_output, fieldnames=pricing[0].keys(), delimiter='\t')
+            tsv_writer.writeheader()
+            for ts, vals in pricing.items():
+                tsv_writer.writerow({'timestamp': ts} | vals)
+            tsv_string = tsv_output.getvalue()
+            click.echo(tsv_string)
+            tsv_output.close()
 
         for em in emp['meters']:
             if self._included_meters and em['serial_number'] not in self._included_meters:
@@ -288,27 +306,61 @@ class OctopusToInflux:
     def _get_pricing(self, agreements):
         f = self._from
         t = self._to
-        standing_charges = []
+        pricing = {}
         for a in sorted(agreements, key=lambda x: maya.parse(x['valid_from'])):
             agreement_valid_from = maya.parse(a['valid_from'])
             agreement_valid_to = maya.parse(a['valid_to']) if a['valid_to'] else self._to
-            if agreement_valid_from <= f and (not agreement_valid_to or agreement_valid_to > f):
+            if agreement_valid_from <= f < agreement_valid_to:
                 if agreement_valid_to < t:
                     t = agreement_valid_to
                 agreement_rates = self._octopus_api.retrieve_tariff_pricing(a['tariff_code'], f.iso8601(), t.iso8601())
-                agreement_standing_charges = agreement_rates['standing_charges']
-                for r in [x for x in agreement_standing_charges if not x['payment_method'] or x['payment_method'] == self._payment_method]:
-                    standing_charges.append({
-                        'tariff_code': a['tariff_code'],
-                        'valid_from': max(f, maya.parse(r['valid_from'])).iso8601(),
-                        'valid_to': (t if not r['valid_to'] else min(t, maya.parse(r['valid_to']))).iso8601(),
-                        'value_exc_vat': r['value_exc_vat'],
-                        'value_inc_vat': r['value_inc_vat'],
-                    })
+                for component, results in agreement_rates.items():
+                    pricing_rows = []
+                    for r in [x for x in results if not x['payment_method'] or x['payment_method'] == self._payment_method]:
+                        pricing_rows.append({
+                            'tariff_code': a['tariff_code'],
+                            'valid_from': max(f, maya.parse(r['valid_from'])).iso8601(),
+                            'valid_to': (t if not r['valid_to'] else min(t, maya.parse(r['valid_to']))).iso8601(),
+                            'value_exc_vat': r['value_exc_vat'],
+                            'value_inc_vat': r['value_inc_vat'],
+                        })
+                    if component not in pricing:
+                        pricing[component] = []
+                    pricing[component] += pricing_rows
                 if t < self._to:
                     f = t
                     t = self._to
-        return standing_charges
+        return pricing
+
+    def _fill_single_series(self, tariff_rows):
+        sorted_rows = sorted(tariff_rows, key=lambda x: maya.parse(x['valid_from']))
+        i = 0
+        series = {}
+        d = self._from
+        while d < self._to:
+            if maya.parse(sorted_rows[i]['valid_to']) >= d:
+                i += 1
+            row = sorted_rows[i]
+            series[d.iso8601()] = self.copy_object_with_keys(row, ['tariff_code', 'value_exc_vat', 'value_inc_vat'])
+            d = d.add(minutes=30)
+        return series
+
+    @staticmethod
+    def copy_object_with_keys(original_object, keys_to_copy):
+        return {key: original_object[key] for key in keys_to_copy if key in original_object}
+
+    def convert_to_standard_unit_rates(self, day_rows, night_rows):
+        # TODO - figure out logic
+        standard_rows = []
+        for r in day_rows:
+            if self._unit_rate_low_start < 12:
+                # start point is time at row start, end is rate_low_start
+                # extra row for rate_low_end
+                pass
+            else:
+                # start is rate_low_end
+                pass
+        return []
 
 
 @click.command()
