@@ -1,6 +1,7 @@
 #!/usr/bin/env python
-
+import csv
 from configparser import ConfigParser
+from io import StringIO
 from types import MappingProxyType
 from urllib import parse
 
@@ -148,19 +149,34 @@ class OctopusApiClient:
     def retrieve_account(self, account_number: str):
         return self._retrieve_data(f'accounts/{account_number}/')
 
-    def _retrieve_tariff_charges(self, tariff_code: str, charges: str, from_date: str, to_date: str):
+    def _retrieve_product(self, code: str):
+        return self._retrieve_data(f'products/{code}/')
+
+    def retrieve_tariff_pricing(self, tariff_code: str, from_date: str, to_date: str):
+        product_code, _ = self._extract_product_code(tariff_code)
+        product = self._retrieve_product(product_code)
+        pricing = {}
+        for link in self._find_links(product, tariff_code):
+            pricing[link['rel']] = self._retrieve_paginated_data(link['href'], from_date, to_date)
+        return pricing
+
+    @staticmethod
+    def _extract_product_code(tariff_code):
         utility = 'electricity' if tariff_code.startswith('E') else 'gas' if tariff_code.startswith('G') else None
         if not utility:
             raise click.ClickException(f'Tariff code is not electricity or gas: {tariff_code}')
-        product_code = '-'.join(tariff_code.split('-')[2:6])
-        path = f'products/{product_code}/{utility}-tariffs/{tariff_code}/{charges}/'
-        return self._retrieve_paginated_data(path, from_date, to_date)
+        product_code = '-'.join(tariff_code.split('-')[2:-1])
+        return product_code, utility
 
-    def retrieve_standing_charges(self, tariff_code: str, from_date: str, to_date: str):
-        return self._retrieve_tariff_charges(tariff_code, 'standing-charges', from_date, to_date)
-
-    def retrieve_unit_rates(self, tariff_code: str, from_date: str, to_date: str):
-        return self._retrieve_tariff_charges(tariff_code, 'standard-unit-rates', from_date, to_date)
+    @staticmethod
+    def _find_links(product, tariff_code):
+        for t in ['single_register_electricity_tariffs', 'dual_register_electricity_tariffs', 'single_register_gas_tariffs']:
+            if t in product:
+                for variant, options in product[t].items():
+                    for payment, details in options.items():
+                        if details['code'] == tariff_code:
+                            return details['links']
+        return None
 
 
 class OctopusToInflux:
@@ -186,8 +202,9 @@ class OctopusToInflux:
             raise click.ClickException('No Octopus account number set')
 
         timezone = config.get('octopus', 'timezone', fallback=None)
-        self._from_iso = maya.when(from_date, timezone=timezone).iso8601()
-        self._to_iso = maya.when(to_date, timezone=timezone).iso8601()
+        self._payment_method = config.get('octopus', 'payment_method', fallback='DIRECT_DEBIT')
+        self._from = maya.when(from_date, timezone=timezone)
+        self._to = maya.when(to_date, timezone=timezone)
 
         included_meters_str = config.get('octopus', 'included_meters', fallback=None)
         self._included_meters = included_meters_str.split(',') if included_meters_str else None
@@ -228,13 +245,22 @@ class OctopusToInflux:
         click.echo(f'Processing electricity meter point: {emp["mpan"]}')
         if 'electricity_mpan' in self._included_tags:
             tags['electricity_mpan'] = emp["mpan"]
+        pricing = self._get_pricing(emp['agreements'])
+        tsv_output = StringIO()
+        tsv_writer = csv.DictWriter(tsv_output, fieldnames=pricing[0].keys(), delimiter='\t')
+        tsv_writer.writeheader()
+        tsv_writer.writerows(pricing)
+        tsv_string = tsv_output.getvalue()
+        click.echo(tsv_string)
+        tsv_output.close()
+
         for em in emp['meters']:
             if self._included_meters and em['serial_number'] not in self._included_meters:
                 click.echo(f'Skipping electricity meter {em['serial_number']} as it is not in octopus.included_meters')
             else:
-                self._process_em(em, emp['agreements'], tags)
+                self._process_em(em, tags)
 
-    def _process_em(self, em, agreements, base_tags: dict[str, str]):
+    def _process_em(self, em, base_tags: dict[str, str]):
         tags = base_tags.copy()
         click.echo(f'Processing electricity meter: {em["serial_number"]}')
         if 'meter_serial_number' in self._included_tags:
@@ -258,6 +284,31 @@ class OctopusToInflux:
         if 'meter_serial_number' in self._included_tags:
             tags['meter_serial_number'] = gm["serial_number"]
         click.echo(f'TAGS: {tags}')
+
+    def _get_pricing(self, agreements):
+        f = self._from
+        t = self._to
+        standing_charges = []
+        for a in sorted(agreements, key=lambda x: maya.parse(x['valid_from'])):
+            agreement_valid_from = maya.parse(a['valid_from'])
+            agreement_valid_to = maya.parse(a['valid_to']) if a['valid_to'] else self._to
+            if agreement_valid_from <= f and (not agreement_valid_to or agreement_valid_to > f):
+                if agreement_valid_to < t:
+                    t = agreement_valid_to
+                agreement_rates = self._octopus_api.retrieve_tariff_pricing(a['tariff_code'], f.iso8601(), t.iso8601())
+                agreement_standing_charges = agreement_rates['standing_charges']
+                for r in [x for x in agreement_standing_charges if not x['payment_method'] or x['payment_method'] == self._payment_method]:
+                    standing_charges.append({
+                        'tariff_code': a['tariff_code'],
+                        'valid_from': max(f, maya.parse(r['valid_from'])).iso8601(),
+                        'valid_to': (t if not r['valid_to'] else min(t, maya.parse(r['valid_to']))).iso8601(),
+                        'value_exc_vat': r['value_exc_vat'],
+                        'value_inc_vat': r['value_inc_vat'],
+                    })
+                if t < self._to:
+                    f = t
+                    t = self._to
+        return standing_charges
 
 
 @click.command()
