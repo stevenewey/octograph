@@ -1,14 +1,21 @@
 #!/usr/bin/env python
 import csv
+import json
+import os
+import re
 from configparser import ConfigParser
+from datetime import datetime, timedelta, timezone, date
 from io import StringIO
 from types import MappingProxyType
 from urllib import parse
+from urllib.parse import urlencode
 
 import click
 import maya
+import pytz
 import requests
 from influxdb import InfluxDBClient
+from pytz import tzinfo
 
 
 def store_series(connection, series, metrics, rate_data, additional_tags):
@@ -114,19 +121,42 @@ def store_series(connection, series, metrics, rate_data, additional_tags):
 
 
 class OctopusApiClient:
-    def __init__(self, api_prefix, api_key):
+    def __init__(self, api_prefix, api_key, group_by=None):
         if not api_key:
             raise click.ClickException('No Octopus API key provided')
         self._api_prefix = api_prefix
         self._api_key = api_key
+        self._group_by = group_by
+
+    @staticmethod
+    def __generate_cache_filename(url: str, params=None):
+        url_with_params = url
+        if params:
+            query_string = urlencode(params, safe='')
+            url_with_params += f"?{query_string}"
+        filename = re.sub('[^0-9A-Za-z-]', '_', url_with_params)
+        return filename
 
     def _retrieve_data(self, path: str, args: dict[str, str] = MappingProxyType({})):
         if path.startswith(self._api_prefix):
             url = path
         else:
             url = f'{self._api_prefix}/{path}'
+
+        cache_directory = 'scratch/cache'
+        os.makedirs(cache_directory, exist_ok=True)
+        filename = self.__generate_cache_filename(url, args)
+        cache_path = os.path.join(cache_directory, f"{filename}.json")
+        if os.path.exists(cache_path):
+            with open(cache_path, 'r', encoding='utf-8') as file:
+                cached_data = json.load(file)
+            return cached_data
+
         response = requests.get(url, params=args, auth=(self._api_key, ''))
         response.raise_for_status()
+        json_data = response.json()
+        with open(cache_path, 'w', encoding='utf-8') as file:
+            json.dump(json_data, file)
         return response.json()
 
     def _retrieve_paginated_data(self, path: str, from_date: str, to_date: str, page: str = None):
@@ -136,6 +166,8 @@ class OctopusApiClient:
             'period_to': to_date,
             'page_size': page_size,
         }
+        if '/consumption/' in path and self._group_by:
+            args['group_by'] = self._group_by
         if page:
             args['page'] = page
         data = self._retrieve_data(path, args)
@@ -179,14 +211,101 @@ class OctopusApiClient:
         return None
 
 
+class DateUtils:
+
+    @staticmethod
+    def iso8601(dt: datetime):
+        return dt.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+class EcoUnitNormaliser:
+    def __init__(self, start_limit: date, end_limit: date, tz: tzinfo, unit_low_start: int, unit_low_end: int):
+        self.start_limit_date = start_limit
+        self.start_limit_time = datetime(start_limit.year, start_limit.month, start_limit.day, 0, 0, 0, 0).astimezone(tz)
+        self.end_limit_date = end_limit
+        self.end_limit_time = (datetime(end_limit.year, end_limit.month, end_limit.day, 0, 0, 0, 0) + timedelta(days=1)).astimezone(tz)
+        self.unit_low_start = unit_low_start
+        self.unit_low_end = unit_low_end
+        self.tz = tz
+
+    def normalise(self, day_rates, night_rates):
+        normalised_rows = []
+        for r in day_rates:
+            normalised_rows += self.normalise_rate(r, self.unit_low_end, self.unit_low_start)
+        for r in night_rates:
+            normalised_rows += self.normalise_rate(r, self.unit_low_start, self.unit_low_end)
+        return normalised_rows
+
+    def normalise_rate(self, r, start_hour: int, end_hour: int):
+        r_from = max(datetime.fromisoformat(r['valid_from']), self.start_limit_time)
+        r_to = min(datetime.fromisoformat(r['valid_to']), self.end_limit_time)
+        midnight = r_from.astimezone(self.tz).replace(hour=0, minute=0, second=0, microsecond=0)
+        normalised_rows = []
+        if start_hour < end_hour:
+            while midnight < r_to:
+                nl_from = midnight.replace(hour=start_hour)
+                nl_to = min(midnight.replace(hour=end_hour), r_to)
+                tomorrow = (midnight.date() + timedelta(days=1))
+                midnight = datetime(tomorrow.year, tomorrow.month, tomorrow.day, 0, 0, 0, 0).astimezone(self.tz).replace(hour=0, minute=0, second=0,
+                                                                                                                          microsecond=0)
+                normalised_rows.append(r | {"valid_from": DateUtils.iso8601(nl_from), "valid_to": DateUtils.iso8601(nl_to)})
+        else:
+            if end_hour != 0:
+                nl_from = midnight
+                nl_to = midnight.replace(hour=end_hour)
+                normalised_rows.append(r | {"valid_from": DateUtils.iso8601(nl_from), "valid_to": DateUtils.iso8601(nl_to)})
+            while midnight < r_to:
+                nl_from = midnight.replace(hour=start_hour)
+                tomorrow = (midnight.date() + timedelta(days=1))
+                midnight = datetime(tomorrow.year, tomorrow.month, tomorrow.day, 0, 0, 00, 0).astimezone(self.tz).replace(hour=0, minute=0, second=0,
+                                                                                                                          microsecond=0)
+                nl_to = min(midnight.replace(hour=end_hour), r_to)
+                normalised_rows.append(r | {"valid_from": DateUtils.iso8601(nl_from), "valid_to": DateUtils.iso8601(nl_to)})
+        return normalised_rows
+
+
+class SeriesMaker:
+    def __init__(self, interval_minutes: int):
+        self.interval_minutes = interval_minutes
+
+    def make_series(self, rows):
+        series = {}
+        for r in rows:
+            dt = datetime.fromisoformat(r['valid_from'])
+            to = datetime.fromisoformat(r['valid_to'])
+            while dt < to:
+                series[DateUtils.iso8601(dt)] = self.copy_object_with_keys(r, ['tariff_code', 'value_exc_vat', 'value_inc_vat'])
+                dt = dt + timedelta(minutes=self.interval_minutes)
+        return series
+
+    @staticmethod
+    def copy_object_with_keys(original_object, keys_to_copy):
+        return {key: original_object[key] for key in keys_to_copy if key in original_object}
+
+
 class OctopusToInflux:
+
+    @staticmethod
+    def _to_group_by(resolution: int):
+        if resolution == 30:
+            return None
+        if resolution == 60:
+            return 'hour'
+        if resolution == 60*24:
+            return 'day'
+        if resolution == 60*24*7:
+            return 'week'
+        raise click.ClickException(f'Invalid resolution: {resolution}')
+
     def __init__(self, config_file=None, from_date=None, to_date=None):
         config = ConfigParser()
         config.read(config_file)
 
+        self._resolution_minutes = config.getint('octopus', 'resolution_minutes', fallback=30)
         self._octopus_api = OctopusApiClient(
             config.get('octopus', 'api_prefix', fallback='https://api.octopus.energy/v1'),
-            config.get('octopus', 'api_key')
+            config.get('octopus', 'api_key'),
+            self._to_group_by(self._resolution_minutes),
         )
 
         self._influx = InfluxDBClient(
@@ -201,13 +320,17 @@ class OctopusToInflux:
         if not self._account_number:
             raise click.ClickException('No Octopus account number set')
 
-        timezone = config.get('octopus', 'timezone', fallback=None)
+        self._timezone = config.get('octopus', 'timezone', fallback='Europe/London')
         self._payment_method = config.get('octopus', 'payment_method', fallback='DIRECT_DEBIT')
-        # TODO: Decide if we want timezone to apply here
-        self._from = maya.when(from_date, timezone=timezone)
-        self._to = maya.when(to_date, timezone=timezone)
+        # TODO: change to `date` here
+        self._from = maya.when(from_date, timezone=self._timezone)
+        self._to = maya.when(to_date, timezone=self._timezone)
         self._unit_rate_low_start = config.getint('octopus', 'unit_rate_low_start', fallback=1)
         self._unit_rate_low_end = config.getint('octopus', 'unit_rate_low_end', fallback=8)
+        self._eco_unit_normaliser = EcoUnitNormaliser(date.fromisoformat(from_date), date.fromisoformat(from_date), pytz.timezone(self._timezone),
+                                                      self._unit_rate_low_start, self._unit_rate_low_end)
+        self._resolution_minutes = config.getint('octopus', 'resolution_minutes', fallback=30)
+        self._series_maker = SeriesMaker(self._resolution_minutes)
 
         included_meters_str = config.get('octopus', 'included_meters', fallback=None)
         self._included_meters = included_meters_str.split(',') if included_meters_str else None
@@ -251,23 +374,29 @@ class OctopusToInflux:
         pricing_dict = self._get_pricing(emp['agreements'])
         standard_unit_rows = []
         if 'day_unit_rates' in pricing_dict and 'night_unit_rates' in pricing_dict:
-            standard_unit_rows + self.convert_to_standard_unit_rates(pricing_dict['day_unit_rates'], pricing_dict['night_unit_rates'])
+            standard_unit_rows += self._eco_unit_normaliser.normalise(pricing_dict['day_unit_rates'], pricing_dict['night_unit_rates'])
         if 'standard_unit_rates' in pricing_dict:
             standard_unit_rows += pricing_dict['standard_unit_rates']
             pass
-        standard_unit_rates = self._fill_single_series(standard_unit_rows)
+        standard_unit_rates = self._series_maker.make_series(standard_unit_rows)
         if 'standing_charges' in pricing_dict:
-            standing_charges = self._fill_single_series(pricing_dict['standing_charges'])
+            standing_charges = self._series_maker.make_series(pricing_dict['standing_charges'])
         else:
             click.echo(f'Could not find pricing for mpan: {emp["mpan"]}')
             standing_charges = {}
         for component, pricing in {'standard_unit_rates': standard_unit_rates, 'standing_charges': standing_charges}.items():
             click.echo(f'*** {component} ***')
             tsv_output = StringIO()
-            tsv_writer = csv.DictWriter(tsv_output, fieldnames=pricing[0].keys(), delimiter='\t')
+            timestamps = list(pricing.keys())
+            values = list(pricing.values())
+            all_keys = set(key for nested_dict in values for key in nested_dict.keys())
+            fieldnames = ['timestamp'] + sorted(all_keys)
+            tsv_writer = csv.DictWriter(tsv_output, fieldnames=fieldnames, delimiter='\t')
             tsv_writer.writeheader()
-            for ts, vals in pricing.items():
-                tsv_writer.writerow({'timestamp': ts} | vals)
+            for timestamp, nested_dict in zip(timestamps, values):
+                row = {'timestamp': timestamp}
+                row.update(nested_dict)
+                tsv_writer.writerow(row)
             tsv_string = tsv_output.getvalue()
             click.echo(tsv_string)
             tsv_output.close()
@@ -331,36 +460,6 @@ class OctopusToInflux:
                     f = t
                     t = self._to
         return pricing
-
-    def _fill_single_series(self, tariff_rows):
-        sorted_rows = sorted(tariff_rows, key=lambda x: maya.parse(x['valid_from']))
-        i = 0
-        series = {}
-        d = self._from
-        while d < self._to:
-            if maya.parse(sorted_rows[i]['valid_to']) >= d:
-                i += 1
-            row = sorted_rows[i]
-            series[d.iso8601()] = self.copy_object_with_keys(row, ['tariff_code', 'value_exc_vat', 'value_inc_vat'])
-            d = d.add(minutes=30)
-        return series
-
-    @staticmethod
-    def copy_object_with_keys(original_object, keys_to_copy):
-        return {key: original_object[key] for key in keys_to_copy if key in original_object}
-
-    def convert_to_standard_unit_rates(self, day_rows, night_rows):
-        # TODO - figure out logic
-        standard_rows = []
-        for r in day_rows:
-            if self._unit_rate_low_start < 12:
-                # start point is time at row start, end is rate_low_start
-                # extra row for rate_low_end
-                pass
-            else:
-                # start is rate_low_end
-                pass
-        return []
 
 
 @click.command()
