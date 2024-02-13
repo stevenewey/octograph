@@ -121,12 +121,24 @@ def store_series(connection, series, metrics, rate_data, additional_tags):
 
 
 class OctopusApiClient:
-    def __init__(self, api_prefix, api_key, group_by=None):
+    def __init__(self, api_prefix, api_key, resolution_minutes=30):
         if not api_key:
             raise click.ClickException('No Octopus API key provided')
         self._api_prefix = api_prefix
         self._api_key = api_key
-        self._group_by = group_by
+        self._group_by = self._to_group_by(resolution_minutes)
+
+    @staticmethod
+    def _to_group_by(resolution: int):
+        if resolution == 30:
+            return None
+        if resolution == 60:
+            return 'hour'
+        if resolution == 60 * 24:
+            return 'day'
+        if resolution == 60 * 24 * 7:
+            return 'week'
+        raise click.ClickException(f'Invalid resolution: {resolution}')
 
     @staticmethod
     def __generate_cache_filename(url: str, params=None):
@@ -214,16 +226,30 @@ class OctopusApiClient:
 class DateUtils:
 
     @staticmethod
+    def yesterday_date_string(tz: tzinfo):
+        return (datetime.now(tz).date() - timedelta(days=1)).isoformat()
+
+    @staticmethod
     def iso8601(dt: datetime):
         return dt.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+    @staticmethod
+    def naive_midnight(d: date):
+        return datetime(d.year, d.month, d.day, 0, 0, 0, 0)
+
+    @staticmethod
+    def at_midnight(dt: datetime):
+        return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    @staticmethod
+    def local_midnight(d: date, tz: tzinfo):
+        return DateUtils.at_midnight(DateUtils.naive_midnight(d).astimezone(tz))
 
 
 class EcoUnitNormaliser:
     def __init__(self, start_limit: date, end_limit: date, tz: tzinfo, unit_low_start: int, unit_low_end: int):
-        self.start_limit_date = start_limit
-        self.start_limit_time = datetime(start_limit.year, start_limit.month, start_limit.day, 0, 0, 0, 0).astimezone(tz)
-        self.end_limit_date = end_limit
-        self.end_limit_time = (datetime(end_limit.year, end_limit.month, end_limit.day, 0, 0, 0, 0) + timedelta(days=1)).astimezone(tz)
+        self.start_limit_time = DateUtils.naive_midnight(start_limit).astimezone(tz)
+        self.end_limit_time = (DateUtils.naive_midnight(end_limit) + timedelta(days=1)).astimezone(tz)
         self.unit_low_start = unit_low_start
         self.unit_low_end = unit_low_end
         self.tz = tz
@@ -239,15 +265,13 @@ class EcoUnitNormaliser:
     def normalise_rate(self, r, start_hour: int, end_hour: int):
         r_from = max(datetime.fromisoformat(r['valid_from']), self.start_limit_time)
         r_to = min(datetime.fromisoformat(r['valid_to']), self.end_limit_time)
-        midnight = r_from.astimezone(self.tz).replace(hour=0, minute=0, second=0, microsecond=0)
+        midnight = DateUtils.at_midnight(r_from.astimezone(self.tz))
         normalised_rows = []
         if start_hour < end_hour:
             while midnight < r_to:
                 nl_from = midnight.replace(hour=start_hour)
                 nl_to = min(midnight.replace(hour=end_hour), r_to)
-                tomorrow = (midnight.date() + timedelta(days=1))
-                midnight = datetime(tomorrow.year, tomorrow.month, tomorrow.day, 0, 0, 0, 0).astimezone(self.tz).replace(hour=0, minute=0, second=0,
-                                                                                                                          microsecond=0)
+                midnight = DateUtils.local_midnight((midnight.date() + timedelta(days=1)), self.tz)
                 normalised_rows.append(r | {"valid_from": DateUtils.iso8601(nl_from), "valid_to": DateUtils.iso8601(nl_to)})
         else:
             if end_hour != 0:
@@ -256,9 +280,7 @@ class EcoUnitNormaliser:
                 normalised_rows.append(r | {"valid_from": DateUtils.iso8601(nl_from), "valid_to": DateUtils.iso8601(nl_to)})
             while midnight < r_to:
                 nl_from = midnight.replace(hour=start_hour)
-                tomorrow = (midnight.date() + timedelta(days=1))
-                midnight = datetime(tomorrow.year, tomorrow.month, tomorrow.day, 0, 0, 00, 0).astimezone(self.tz).replace(hour=0, minute=0, second=0,
-                                                                                                                          microsecond=0)
+                midnight = DateUtils.local_midnight((midnight.date() + timedelta(days=1)), self.tz)
                 nl_to = min(midnight.replace(hour=end_hour), r_to)
                 normalised_rows.append(r | {"valid_from": DateUtils.iso8601(nl_from), "valid_to": DateUtils.iso8601(nl_to)})
         return normalised_rows
@@ -285,18 +307,6 @@ class SeriesMaker:
 
 class OctopusToInflux:
 
-    @staticmethod
-    def _to_group_by(resolution: int):
-        if resolution == 30:
-            return None
-        if resolution == 60:
-            return 'hour'
-        if resolution == 60*24:
-            return 'day'
-        if resolution == 60*24*7:
-            return 'week'
-        raise click.ClickException(f'Invalid resolution: {resolution}')
-
     def __init__(self, config_file=None, from_date=None, to_date=None):
         config = ConfigParser()
         config.read(config_file)
@@ -305,7 +315,7 @@ class OctopusToInflux:
         self._octopus_api = OctopusApiClient(
             config.get('octopus', 'api_prefix', fallback='https://api.octopus.energy/v1'),
             config.get('octopus', 'api_key'),
-            self._to_group_by(self._resolution_minutes),
+            self._resolution_minutes,
         )
 
         self._influx = InfluxDBClient(
@@ -320,16 +330,16 @@ class OctopusToInflux:
         if not self._account_number:
             raise click.ClickException('No Octopus account number set')
 
-        self._timezone = config.get('octopus', 'timezone', fallback='Europe/London')
+        self._timezone = pytz.timezone(config.get('octopus', 'timezone', fallback='Europe/London'))
+        self._from_date = date.fromisoformat(DateUtils.yesterday_date_string(self._timezone) if not from_date or from_date == 'yesterday' else from_date)
+        self._to_date = date.fromisoformat(DateUtils.yesterday_date_string(self._timezone) if not to_date or to_date == 'yesterday' else to_date)
+        self._from = DateUtils.local_midnight(self._from_date, self._timezone)
+        self._to = DateUtils.local_midnight(self._to_date, self._timezone)
         self._payment_method = config.get('octopus', 'payment_method', fallback='DIRECT_DEBIT')
-        # TODO: change to `date` here
-        self._from = maya.when(from_date, timezone=self._timezone)
-        self._to = maya.when(to_date, timezone=self._timezone)
         self._unit_rate_low_start = config.getint('octopus', 'unit_rate_low_start', fallback=1)
         self._unit_rate_low_end = config.getint('octopus', 'unit_rate_low_end', fallback=8)
-        self._eco_unit_normaliser = EcoUnitNormaliser(date.fromisoformat(from_date), date.fromisoformat(from_date), pytz.timezone(self._timezone),
-                                                      self._unit_rate_low_start, self._unit_rate_low_end)
-        self._resolution_minutes = config.getint('octopus', 'resolution_minutes', fallback=30)
+
+        self._eco_unit_normaliser = EcoUnitNormaliser(self._from_date, self._to_date, self._timezone, self._unit_rate_low_start, self._unit_rate_low_end)
         self._series_maker = SeriesMaker(self._resolution_minutes)
 
         included_meters_str = config.get('octopus', 'included_meters', fallback=None)
@@ -436,20 +446,20 @@ class OctopusToInflux:
         f = self._from
         t = self._to
         pricing = {}
-        for a in sorted(agreements, key=lambda x: maya.parse(x['valid_from'])):
-            agreement_valid_from = maya.parse(a['valid_from'])
-            agreement_valid_to = maya.parse(a['valid_to']) if a['valid_to'] else self._to
+        for a in sorted(agreements, key=lambda x: datetime.fromisoformat(x['valid_from'])):
+            agreement_valid_from = datetime.fromisoformat(a['valid_from'])
+            agreement_valid_to = datetime.fromisoformat(a['valid_to']) if a['valid_to'] else self._to
             if agreement_valid_from <= f < agreement_valid_to:
                 if agreement_valid_to < t:
                     t = agreement_valid_to
-                agreement_rates = self._octopus_api.retrieve_tariff_pricing(a['tariff_code'], f.iso8601(), t.iso8601())
+                agreement_rates = self._octopus_api.retrieve_tariff_pricing(a['tariff_code'], DateUtils.iso8601(f), DateUtils.iso8601(t))
                 for component, results in agreement_rates.items():
                     pricing_rows = []
                     for r in [x for x in results if not x['payment_method'] or x['payment_method'] == self._payment_method]:
                         pricing_rows.append({
                             'tariff_code': a['tariff_code'],
-                            'valid_from': max(f, maya.parse(r['valid_from'])).iso8601(),
-                            'valid_to': (t if not r['valid_to'] else min(t, maya.parse(r['valid_to']))).iso8601(),
+                            'valid_from': DateUtils.iso8601(max(f, datetime.fromisoformat(r['valid_from']))),
+                            'valid_to': DateUtils.iso8601(t if not r['valid_to'] else min(t, datetime.fromisoformat(r['valid_to']))),
                             'value_exc_vat': r['value_exc_vat'],
                             'value_inc_vat': r['value_inc_vat'],
                         })
@@ -468,8 +478,8 @@ class OctopusToInflux:
     default="octograph.ini",
     type=click.Path(exists=True, dir_okay=True, readable=True),
 )
-@click.option('--from-date', default='yesterday midnight', type=click.STRING)
-@click.option('--to-date', default='today midnight', type=click.STRING)
+@click.option('--from-date', default='yesterday', type=click.STRING)
+@click.option('--to-date', default='yesterday', type=click.STRING)
 def cmd(config_file, from_date, to_date):
     app = OctopusToInflux(config_file, from_date, to_date)
     app.run()
