@@ -4,7 +4,8 @@ from datetime import datetime
 import pytz
 from parameterized import parameterized
 
-from octopus_to_influxdb import DateUtils, SeriesMaker
+from app.series_maker import SeriesMaker
+from app.date_utils import DateUtils
 
 LONDON_TZ = pytz.timezone('Europe/London')
 

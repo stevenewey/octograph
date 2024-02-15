@@ -1,21 +1,19 @@
 #!/usr/bin/env python
-import csv
-import json
-import os
-import re
 from configparser import ConfigParser
-from datetime import datetime, timedelta, timezone, date
-from io import StringIO
-from types import MappingProxyType
-from urllib import parse
-from urllib.parse import urlencode
+from datetime import datetime, date, timedelta
 
 import click
 import maya
 import pytz
-import requests
-from influxdb import InfluxDBClient
-from pytz import tzinfo
+from influxdb_client import InfluxDBClient
+from influxdb_client.client.write.point import Point
+from influxdb_client.client.write_api import SYNCHRONOUS
+from influxdb_client.domain.write_precision import WritePrecision
+
+from app.date_utils import DateUtils
+from app.eco_unit_normaliser import EcoUnitNormaliser
+from app.octopus_api_client import OctopusApiClient
+from app.series_maker import SeriesMaker
 
 
 def store_series(connection, series, metrics, rate_data, additional_tags):
@@ -120,227 +118,43 @@ def store_series(connection, series, metrics, rate_data, additional_tags):
     # connection.write_points(measurements)
 
 
-class OctopusApiClient:
-    def __init__(self, api_prefix, api_key, resolution_minutes=30):
-        if not api_key:
-            raise click.ClickException('No Octopus API key provided')
-        self._api_prefix = api_prefix
-        self._api_key = api_key
-        self._group_by = self._to_group_by(resolution_minutes)
-
-    @staticmethod
-    def _to_group_by(resolution: int):
-        if resolution == 30:
-            return None
-        if resolution == 60:
-            return 'hour'
-        if resolution == 60 * 24:
-            return 'day'
-        if resolution == 60 * 24 * 7:
-            return 'week'
-        raise click.ClickException(f'Invalid resolution: {resolution}')
-
-    @staticmethod
-    def __generate_cache_filename(url: str, params=None):
-        url_with_params = url
-        if params:
-            query_string = urlencode(params, safe='')
-            url_with_params += f"?{query_string}"
-        filename = re.sub('[^0-9A-Za-z-]', '_', url_with_params)
-        return filename
-
-    def _retrieve_data(self, path: str, args: dict[str, str] = MappingProxyType({})):
-        if path.startswith(self._api_prefix):
-            url = path
-        else:
-            url = f'{self._api_prefix}/{path}'
-
-        cache_directory = 'scratch/cache'
-        os.makedirs(cache_directory, exist_ok=True)
-        filename = self.__generate_cache_filename(url, args)
-        cache_path = os.path.join(cache_directory, f"{filename}.json")
-        if os.path.exists(cache_path):
-            with open(cache_path, 'r', encoding='utf-8') as file:
-                cached_data = json.load(file)
-            return cached_data
-
-        response = requests.get(url, params=args, auth=(self._api_key, ''))
-        response.raise_for_status()
-        json_data = response.json()
-        with open(cache_path, 'w', encoding='utf-8') as file:
-            json.dump(json_data, file)
-        return response.json()
-
-    def _retrieve_paginated_data(self, path: str, from_date: str, to_date: str, page: str = None):
-        page_size = 25000 if '/consumption/' in path else 1500
-        args = {
-            'period_from': from_date,
-            'period_to': to_date,
-            'page_size': page_size,
-        }
-        if '/consumption/' in path and self._group_by:
-            args['group_by'] = self._group_by
-        if page:
-            args['page'] = page
-        data = self._retrieve_data(path, args)
-        results = data.get('results', [])
-        if data['next']:
-            url_query = parse.urlparse(data['next']).query
-            next_page = parse.parse_qs(url_query)['page'][0]
-            results += self._retrieve_paginated_data(path, from_date, to_date, next_page)
-        return results
-
-    def retrieve_account(self, account_number: str):
-        return self._retrieve_data(f'accounts/{account_number}/')
-
-    def _retrieve_product(self, code: str):
-        return self._retrieve_data(f'products/{code}/')
-
-    def retrieve_tariff_pricing(self, tariff_code: str, from_date: str, to_date: str):
-        product_code, _ = self._extract_product_code(tariff_code)
-        product = self._retrieve_product(product_code)
-        pricing = {}
-        for link in self._find_links(product, tariff_code):
-            pricing[link['rel']] = self._retrieve_paginated_data(link['href'], from_date, to_date)
-        return pricing
-
-    @staticmethod
-    def _extract_product_code(tariff_code):
-        utility = 'electricity' if tariff_code.startswith('E') else 'gas' if tariff_code.startswith('G') else None
-        if not utility:
-            raise click.ClickException(f'Tariff code is not electricity or gas: {tariff_code}')
-        product_code = '-'.join(tariff_code.split('-')[2:-1])
-        return product_code, utility
-
-    @staticmethod
-    def _find_links(product, tariff_code):
-        for t in ['single_register_electricity_tariffs', 'dual_register_electricity_tariffs', 'single_register_gas_tariffs']:
-            if t in product:
-                for variant, options in product[t].items():
-                    for payment, details in options.items():
-                        if details['code'] == tariff_code:
-                            return details['links']
-        return None
-
-
-class DateUtils:
-
-    @staticmethod
-    def yesterday_date_string(tz: tzinfo):
-        return (datetime.now(tz).date() - timedelta(days=1)).isoformat()
-
-    @staticmethod
-    def iso8601(dt: datetime):
-        return dt.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-
-    @staticmethod
-    def naive_midnight(d: date):
-        return datetime(d.year, d.month, d.day, 0, 0, 0, 0)
-
-    @staticmethod
-    def at_midnight(dt: datetime):
-        return dt.replace(hour=0, minute=0, second=0, microsecond=0)
-
-    @staticmethod
-    def local_midnight(d: date, tz: tzinfo):
-        return DateUtils.at_midnight(DateUtils.naive_midnight(d).astimezone(tz))
-
-
-class EcoUnitNormaliser:
-    def __init__(self, start_limit: date, end_limit: date, tz: tzinfo, unit_low_start: int, unit_low_end: int):
-        self.start_limit_time = DateUtils.naive_midnight(start_limit).astimezone(tz)
-        self.end_limit_time = (DateUtils.naive_midnight(end_limit) + timedelta(days=1)).astimezone(tz)
-        self.unit_low_start = unit_low_start
-        self.unit_low_end = unit_low_end
-        self.tz = tz
-
-    def normalise(self, day_rates, night_rates):
-        normalised_rows = []
-        for r in day_rates:
-            normalised_rows += self.normalise_rate(r, self.unit_low_end, self.unit_low_start)
-        for r in night_rates:
-            normalised_rows += self.normalise_rate(r, self.unit_low_start, self.unit_low_end)
-        return normalised_rows
-
-    def normalise_rate(self, r, start_hour: int, end_hour: int):
-        r_from = max(datetime.fromisoformat(r['valid_from']), self.start_limit_time)
-        r_to = min(datetime.fromisoformat(r['valid_to']), self.end_limit_time)
-        midnight = DateUtils.at_midnight(r_from.astimezone(self.tz))
-        normalised_rows = []
-        if start_hour < end_hour:
-            while midnight < r_to:
-                nl_from = midnight.replace(hour=start_hour)
-                nl_to = min(midnight.replace(hour=end_hour), r_to)
-                midnight = DateUtils.local_midnight((midnight.date() + timedelta(days=1)), self.tz)
-                normalised_rows.append(r | {"valid_from": DateUtils.iso8601(nl_from), "valid_to": DateUtils.iso8601(nl_to)})
-        else:
-            if end_hour != 0:
-                nl_from = midnight
-                nl_to = midnight.replace(hour=end_hour)
-                normalised_rows.append(r | {"valid_from": DateUtils.iso8601(nl_from), "valid_to": DateUtils.iso8601(nl_to)})
-            while midnight < r_to:
-                nl_from = midnight.replace(hour=start_hour)
-                midnight = DateUtils.local_midnight((midnight.date() + timedelta(days=1)), self.tz)
-                nl_to = min(midnight.replace(hour=end_hour), r_to)
-                normalised_rows.append(r | {"valid_from": DateUtils.iso8601(nl_from), "valid_to": DateUtils.iso8601(nl_to)})
-        return normalised_rows
-
-
-class SeriesMaker:
-    def __init__(self, interval_minutes: int):
-        self.interval_minutes = interval_minutes
-
-    def make_series(self, rows):
-        series = {}
-        for r in rows:
-            dt = datetime.fromisoformat(r['valid_from'])
-            to = datetime.fromisoformat(r['valid_to'])
-            while dt < to:
-                series[DateUtils.iso8601(dt)] = self.copy_object_with_keys(r, ['tariff_code', 'value_exc_vat', 'value_inc_vat'])
-                dt = dt + timedelta(minutes=self.interval_minutes)
-        return series
-
-    @staticmethod
-    def copy_object_with_keys(original_object, keys_to_copy):
-        return {key: original_object[key] for key in keys_to_copy if key in original_object}
-
-
 class OctopusToInflux:
 
     def __init__(self, config_file=None, from_date=None, to_date=None):
         config = ConfigParser()
         config.read(config_file)
 
+        self._account_number = config.get('octopus', 'account_number')
+        if not self._account_number:
+            raise click.ClickException('No Octopus account number set')
+
+        timezone = pytz.timezone(config.get('octopus', 'timezone', fallback='Europe/London'))
+        from_date = date.fromisoformat(DateUtils.yesterday_date_string(timezone) if not from_date or from_date == 'yesterday' else from_date)
+        to_date = date.fromisoformat(DateUtils.yesterday_date_string(timezone) if not to_date or to_date == 'yesterday' else to_date)
+        self._from = DateUtils.local_midnight(from_date, timezone)
+        self._to = DateUtils.local_midnight(to_date + timedelta(days=1), timezone)
+        self._payment_method = config.get('octopus', 'payment_method', fallback='DIRECT_DEBIT')
+
+        low_start = config.getint('octopus', 'unit_rate_low_start', fallback=1)
+        low_end = config.getint('octopus', 'unit_rate_low_end', fallback=8)
+        self._eco_unit_normaliser = EcoUnitNormaliser(from_date, to_date, timezone, low_start, low_end)
+
         self._resolution_minutes = config.getint('octopus', 'resolution_minutes', fallback=30)
+        self._series_maker = SeriesMaker(self._resolution_minutes)
+
         self._octopus_api = OctopusApiClient(
             config.get('octopus', 'api_prefix', fallback='https://api.octopus.energy/v1'),
             config.get('octopus', 'api_key'),
             self._resolution_minutes,
         )
 
-        self._influx = InfluxDBClient(
-            host=config.get('influxdb', 'host', fallback="localhost"),
-            port=config.getint('influxdb', 'port', fallback=8086),
-            username=config.get('influxdb', 'user', fallback=""),
-            password=config.get('influxdb', 'password', fallback=""),
-            database=config.get('influxdb', 'database', fallback="energy"),
+        influx_client = InfluxDBClient(
+            url=config.get('influxdb', 'url', fallback='http://localhost:8086'),
+            token=config.get('influxdb', 'token', fallback=''),
+            org=config.get('influxdb', 'org', fallback='primary')
         )
-
-        self._account_number = config.get('octopus', 'account_number')
-        if not self._account_number:
-            raise click.ClickException('No Octopus account number set')
-
-        self._timezone = pytz.timezone(config.get('octopus', 'timezone', fallback='Europe/London'))
-        self._from_date = date.fromisoformat(DateUtils.yesterday_date_string(self._timezone) if not from_date or from_date == 'yesterday' else from_date)
-        self._to_date = date.fromisoformat(DateUtils.yesterday_date_string(self._timezone) if not to_date or to_date == 'yesterday' else to_date)
-        self._from = DateUtils.local_midnight(self._from_date, self._timezone)
-        self._to = DateUtils.local_midnight(self._to_date, self._timezone)
-        self._payment_method = config.get('octopus', 'payment_method', fallback='DIRECT_DEBIT')
-        self._unit_rate_low_start = config.getint('octopus', 'unit_rate_low_start', fallback=1)
-        self._unit_rate_low_end = config.getint('octopus', 'unit_rate_low_end', fallback=8)
-
-        self._eco_unit_normaliser = EcoUnitNormaliser(self._from_date, self._to_date, self._timezone, self._unit_rate_low_start, self._unit_rate_low_end)
-        self._series_maker = SeriesMaker(self._resolution_minutes)
+        self._influx = influx_client.write_api(write_options=SYNCHRONOUS)
+        self._influx_bucket = config.get('influxdb', 'bucket', fallback='primary')
 
         included_meters_str = config.get('octopus', 'included_meters', fallback=None)
         self._included_meters = included_meters_str.split(',') if included_meters_str else None
@@ -353,8 +167,7 @@ class OctopusToInflux:
 
     def run(self):
         account = self._octopus_api.retrieve_account(self._account_number)
-        tags = {}
-        tags |= self._additional_tags
+        tags = self._additional_tags.copy()
         if 'account_number' in self._included_tags:
             tags['account_number'] = account['number']
 
@@ -394,35 +207,48 @@ class OctopusToInflux:
         else:
             click.echo(f'Could not find pricing for mpan: {emp["mpan"]}')
             standing_charges = {}
-        for component, pricing in {'standard_unit_rates': standard_unit_rates, 'standing_charges': standing_charges}.items():
-            click.echo(f'*** {component} ***')
-            tsv_output = StringIO()
-            timestamps = list(pricing.keys())
-            values = list(pricing.values())
-            all_keys = set(key for nested_dict in values for key in nested_dict.keys())
-            fieldnames = ['timestamp'] + sorted(all_keys)
-            tsv_writer = csv.DictWriter(tsv_output, fieldnames=fieldnames, delimiter='\t')
-            tsv_writer.writeheader()
-            for timestamp, nested_dict in zip(timestamps, values):
-                row = {'timestamp': timestamp}
-                row.update(nested_dict)
-                tsv_writer.writerow(row)
-            tsv_string = tsv_output.getvalue()
-            click.echo(tsv_string)
-            tsv_output.close()
+
+        self._store_emp_pricing(standard_unit_rates, standing_charges, tags)
 
         for em in emp['meters']:
             if self._included_meters and em['serial_number'] not in self._included_meters:
                 click.echo(f'Skipping electricity meter {em['serial_number']} as it is not in octopus.included_meters')
             else:
-                self._process_em(em, tags)
+                self._process_em(emp['mpan'], em, standard_unit_rates, standing_charges, tags)
 
-    def _process_em(self, em, base_tags: dict[str, str]):
+    def _process_em(self, mpan: str, em, standard_unit_rates, standing_charges, base_tags: dict[str, str]):
         tags = base_tags.copy()
         click.echo(f'Processing electricity meter: {em["serial_number"]}')
         if 'meter_serial_number' in self._included_tags:
-            tags['meter_serial_number'] = em["serial_number"]
-        click.echo(f'TAGS: {tags}')
+            tags['meter_serial_number'] = em['serial_number']
+        last_interval_start = DateUtils.iso8601(self._to - timedelta(minutes=self._resolution_minutes))
+        data = self._octopus_api.retrieve_electricity_consumption(mpan, em['serial_number'], DateUtils.iso8601(self._from), last_interval_start)
+        consumption = self._series_maker.make_series(data)
+        self._store_em_consumption(consumption, standard_unit_rates, standing_charges, tags)
+
+    def _store_em_consumption(self, consumption: dict, standard_unit_rates, standing_charges, base_tags: [str, str]):
+        points = []
+        for t, c in consumption.items():
+            usage_cost_exc_vat_pence = standard_unit_rates[t]['value_exc_vat'] * c['consumption']
+            usage_cost_inc_vat_pence = standard_unit_rates[t]['value_inc_vat'] * c['consumption']
+            standing_charge_cost_exc_vat_pence = standing_charges[t]['value_exc_vat'] / (60 * 24 / self._resolution_minutes)
+            standing_charge_cost_inc_vat_pence = standing_charges[t]['value_inc_vat'] / (60 * 24 / self._resolution_minutes)
+            points.append(Point.from_dict({
+                'measurement': 'electricity_consumption',
+                'time': t,
+                'fields': {
+                    'usage_kwh': c['consumption'],
+                    'usage_cost_exc_vat_pence': usage_cost_exc_vat_pence,
+                    'usage_cost_inc_vat_pence': usage_cost_inc_vat_pence,
+                    'standing_charge_cost_exc_vat_pence': standing_charge_cost_exc_vat_pence,
+                    'standing_charge_cost_inc_vat_pence': standing_charge_cost_inc_vat_pence,
+                    'total_cost_exc_vat_pence': usage_cost_exc_vat_pence + standing_charge_cost_exc_vat_pence,
+                    'total_cost_inc_vat_pence': usage_cost_inc_vat_pence + standing_charge_cost_inc_vat_pence,
+                },
+                'tags': {'tariff_code': standard_unit_rates[t]['tariff_code']} | base_tags,
+            }, write_precision=WritePrecision.S))
+        click.echo(len(points))
+        self._influx.write(self._influx_bucket, record=points)
 
     def _process_gmp(self, gmp, base_tags: dict[str, str]):
         tags = base_tags.copy()
@@ -470,6 +296,24 @@ class OctopusToInflux:
                     f = t
                     t = self._to
         return pricing
+
+    def _store_emp_pricing(self, standard_unit_rates, standing_charges, base_tags: dict[str, str]):
+        points = [
+            Point.from_dict({
+                'measurement': 'electricity_pricing',
+                'time': t,
+                'fields': {
+                    'unit_price_exc_vat_price': standard_unit_rates[t]['value_exc_vat'],
+                    'unit_price_inc_vat_price': standard_unit_rates[t]['value_inc_vat'],
+                    'standing_charge_exc_vat_price': standing_charges[t]['value_exc_vat'],
+                    'standing_charge_inc_vat_price': standing_charges[t]['value_inc_vat'],
+                },
+                'tags': {'tariff_code': standard_unit_rates[t]['tariff_code']} | base_tags,
+            }, write_precision=WritePrecision.S)
+            for t in set(standard_unit_rates.keys()).union(standing_charges.keys())
+        ]
+        click.echo(len(points))
+        self._influx.write(self._influx_bucket, record=points)
 
 
 @click.command()

@@ -10,8 +10,10 @@ datasources:
   access: proxy
   url: http://influxdb:8086
   jsonData:
-    dbName: octopus
+    version: InfluxQL
+    dbName: octopus-energy-metrics
     httpMode: GET
-    httpHeaderName1: 'Authorization'
+    httpHeaderName1: Authorization
+    tlsSkipVerify: false
   secureJsonData:
     httpHeaderValue1: 'Token secret_admin_token'
