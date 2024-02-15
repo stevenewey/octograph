@@ -17,7 +17,7 @@ from app.series_maker import SeriesMaker
 
 class OctopusToInflux:
 
-    def __init__(self, config_file=None, from_date=None, to_date=None):
+    def __init__(self, config_file=None):
         config = ConfigParser()
         config.read(config_file)
 
@@ -25,16 +25,11 @@ class OctopusToInflux:
         if not self._account_number:
             raise click.ClickException('No Octopus account number set')
 
-        timezone = pytz.timezone(config.get('octopus', 'timezone', fallback='Europe/London'))
-        from_date = date.fromisoformat(DateUtils.yesterday_date_string(timezone) if not from_date or from_date == 'yesterday' else from_date)
-        to_date = date.fromisoformat(DateUtils.yesterday_date_string(timezone) if not to_date or to_date == 'yesterday' else to_date)
-        self._from = DateUtils.local_midnight(from_date, timezone)
-        self._to = DateUtils.local_midnight(to_date + timedelta(days=1), timezone)
+        self._timezone = pytz.timezone(config.get('octopus', 'timezone', fallback='Europe/London'))
         self._payment_method = config.get('octopus', 'payment_method', fallback='DIRECT_DEBIT')
-
         low_start = config.getint('octopus', 'unit_rate_low_start', fallback=1)
         low_end = config.getint('octopus', 'unit_rate_low_end', fallback=8)
-        self._eco_unit_normaliser = EcoUnitNormaliser(from_date, to_date, timezone, low_start, low_end)
+        self._eco_unit_normaliser = EcoUnitNormaliser(self._timezone, low_start, low_end)
 
         self._resolution_minutes = config.getint('octopus', 'resolution_minutes', fallback=30)
         self._series_maker = SeriesMaker(self._resolution_minutes)
@@ -43,6 +38,7 @@ class OctopusToInflux:
             config.get('octopus', 'api_prefix', fallback='https://api.octopus.energy/v1'),
             config.get('octopus', 'api_key'),
             self._resolution_minutes,
+            config.get('octopus', 'cache_dir', fallback='/tmp/octopus_api_cache') if config.getboolean('octopus', 'enable_cache') else None
         )
 
         self._influx_bucket = config.get('influxdb', 'bucket', fallback='primary')
@@ -64,24 +60,30 @@ class OctopusToInflux:
         self._additional_tags = dict(item.split('=') for item in additional_tags_str.split(',')) if additional_tags_str else {}
 
     def find_latest_date(self, measurement: str, field: str, tags: dict[str, str]):
-        t = ' '.join([f' and r["{k}"] == "{v}"' for k, v in tags.items()])
-        f = f'r["_measurement"] == "{measurement}" and r._field == "{field} {t}")'
+        tf = ' '.join([f' and r["{k}"] == "{v}"' for k, v in tags.items()])
+        f = f'r["_measurement"] == "{measurement}" and r._field == "{field}" {tf})'
         q = f'from(bucket: "{self._influx_bucket}") |> range(start: -30d) |> filter(fn: (r) => {f} |> last()'
         r = self._influx_query.query(q)
         if len(r) != 1 or len(r[0].records) != 1:
             raise click.ClickException(f'No data found for {measurement} in last 30 days - try back-filling')
         return r[0].records[0].values['_time']
 
-    def run(self):
+    def collect(self, from_str: str, to_str: str):
+        click.echo(f'Collecting data between {from_str} and {to_str}')
+        from_str = date.fromisoformat(DateUtils.yesterday_date_string(self._timezone)) if from_str == 'yesterday' else from_str
+        to_str = date.fromisoformat(DateUtils.yesterday_date_string(self._timezone)) if to_str == 'yesterday' else to_str
+        collect_from = None if from_str == 'latest' else DateUtils.local_midnight(from_str, self._timezone)
+        collect_to = DateUtils.local_midnight(to_str + timedelta(days=1), self._timezone)
+
         account = self._octopus_api.retrieve_account(self._account_number)
         tags = self._additional_tags.copy()
         if 'account_number' in self._included_tags:
             tags['account_number'] = account['number']
 
         for p in account['properties']:
-            self._process_property(p, tags)
+            self._process_property(p, collect_from, collect_to, tags)
 
-    def _process_property(self, p, base_tags: dict[str, str]):
+    def _process_property(self, p, collect_from: datetime, collect_to: datetime, base_tags: dict[str, str]):
         tags = base_tags.copy()
         click.echo(f'Processing property: {p["address_line_1"]}, {p["postcode"]}')
         for field in ['address_line_1', 'address_line_2', 'address_line_3', 'town', 'postcode']:
@@ -90,21 +92,29 @@ class OctopusToInflux:
         if len(p['electricity_meter_points']) == 0:
             click.echo('No electricity meter points found in property')
         for emp in p['electricity_meter_points']:
-            self._process_emp(emp, tags)
+            self._process_emp(emp, collect_from, collect_to, tags)
         if len(p['gas_meter_points']) == 0:
             click.echo('No gas meter points found in property')
         for emp in p['gas_meter_points']:
-            self._process_gmp(emp, tags)
+            self._process_gmp(emp, collect_from, collect_to, tags)
 
-    def _process_emp(self, emp, base_tags: dict[str, str]):
+    def _process_emp(self, emp, collect_from: datetime, collect_to: datetime, base_tags: dict[str, str]):
         tags = base_tags.copy()
         click.echo(f'Processing electricity meter point: {emp["mpan"]}')
         if 'electricity_mpan' in self._included_tags:
             tags['electricity_mpan'] = emp["mpan"]
-        pricing_dict = self._get_pricing(emp['agreements'])
+        if not collect_from:
+            collect_from = self.find_latest_date('electricity_consumption', 'usage_kwh', tags) + timedelta(minutes=self._resolution_minutes)
+        if DateUtils.minutes_between(collect_from, collect_to) < self._resolution_minutes:
+            click.echo('No new data to collect for EMP')
+            return
+
+        pricing_dict = self._get_pricing(emp['agreements'], collect_from, collect_to)
         standard_unit_rows = []
         if 'day_unit_rates' in pricing_dict and 'night_unit_rates' in pricing_dict:
-            standard_unit_rows += self._eco_unit_normaliser.normalise(pricing_dict['day_unit_rates'], pricing_dict['night_unit_rates'])
+            standard_unit_rows += self._eco_unit_normaliser.normalise(pricing_dict['day_unit_rates'], pricing_dict['night_unit_rates'],
+                                                                      DateUtils.local_date(collect_from, self._timezone),
+                                                                      DateUtils.local_date(collect_to, self._timezone))
         if 'standard_unit_rates' in pricing_dict:
             standard_unit_rows += pricing_dict['standard_unit_rates']
             pass
@@ -121,15 +131,15 @@ class OctopusToInflux:
             if self._included_meters and em['serial_number'] not in self._included_meters:
                 click.echo(f'Skipping electricity meter {em['serial_number']} as it is not in octopus.included_meters')
             else:
-                self._process_em(emp['mpan'], em, standard_unit_rates, standing_charges, tags)
+                self._process_em(emp['mpan'], em, collect_from, collect_to, standard_unit_rates, standing_charges, tags)
 
-    def _process_em(self, mpan: str, em, standard_unit_rates, standing_charges, base_tags: dict[str, str]):
+    def _process_em(self, mpan: str, em, collect_from: datetime, collect_to: datetime, standard_unit_rates, standing_charges, base_tags: dict[str, str]):
         tags = base_tags.copy()
         click.echo(f'Processing electricity meter: {em["serial_number"]}')
         if 'meter_serial_number' in self._included_tags:
             tags['meter_serial_number'] = em['serial_number']
-        last_interval_start = DateUtils.iso8601(self._to - timedelta(minutes=self._resolution_minutes))
-        data = self._octopus_api.retrieve_electricity_consumption(mpan, em['serial_number'], DateUtils.iso8601(self._from), last_interval_start)
+        last_interval_start = DateUtils.iso8601(collect_to - timedelta(minutes=self._resolution_minutes))
+        data = self._octopus_api.retrieve_electricity_consumption(mpan, em['serial_number'], DateUtils.iso8601(collect_from), last_interval_start)
         consumption = self._series_maker.make_series(data)
         self._store_em_consumption(consumption, standard_unit_rates, standing_charges, tags)
 
@@ -157,31 +167,32 @@ class OctopusToInflux:
         click.echo(len(points))
         self._influx_write.write(self._influx_bucket, record=points)
 
-    def _process_gmp(self, gmp, base_tags: dict[str, str]):
+    def _process_gmp(self, gmp, collect_from: datetime, collect_to: datetime, base_tags: dict[str, str]):
         tags = base_tags.copy()
         click.echo(f'Processing gas meter point: {gmp["mprn"]}')
         if 'gas_mprn' in self._included_tags:
             tags['gas_mprn'] = gmp["mprn"]
+        click.echo(f'TODO: _store_gmp_pricing')
         for gm in gmp['meters']:
             if self._included_meters and gm['serial_number'] not in self._included_meters:
                 click.echo(f'Skipping gas meter {gm['serial_number']} as it is not in octopus.included_meters')
             else:
-                self._process_gm(gm, tags)
+                self._process_gm(gm, collect_from, collect_to, tags)
 
-    def _process_gm(self, gm, base_tags: dict[str, str]):
+    def _process_gm(self, gm, collect_from: datetime, collect_to: datetime, base_tags: dict[str, str]):
         tags = base_tags.copy()
         click.echo(f'Processing gas meter: {gm["serial_number"]}')
         if 'meter_serial_number' in self._included_tags:
             tags['meter_serial_number'] = gm["serial_number"]
-        click.echo(f'TAGS: {tags}')
+        click.echo(f'TODO: _store_gm_consumption')
 
-    def _get_pricing(self, agreements):
-        f = self._from
-        t = self._to
+    def _get_pricing(self, agreements, collect_from: datetime, collect_to: datetime):
+        f = collect_from
+        t = collect_to
         pricing = {}
         for a in sorted(agreements, key=lambda x: datetime.fromisoformat(x['valid_from'])):
             agreement_valid_from = datetime.fromisoformat(a['valid_from'])
-            agreement_valid_to = datetime.fromisoformat(a['valid_to']) if a['valid_to'] else self._to
+            agreement_valid_to = datetime.fromisoformat(a['valid_to']) if a['valid_to'] else collect_to
             if agreement_valid_from <= f < agreement_valid_to:
                 if agreement_valid_to < t:
                     t = agreement_valid_to
@@ -199,9 +210,9 @@ class OctopusToInflux:
                     if component not in pricing:
                         pricing[component] = []
                     pricing[component] += pricing_rows
-                if t < self._to:
+                if t < collect_to:
                     f = t
-                    t = self._to
+                    t = collect_to
         return pricing
 
     def _store_emp_pricing(self, standard_unit_rates, standing_charges, base_tags: dict[str, str]):
@@ -232,8 +243,8 @@ class OctopusToInflux:
 @click.option('--from-date', default='yesterday', type=click.STRING)
 @click.option('--to-date', default='yesterday', type=click.STRING)
 def cmd(config_file, from_date, to_date):
-    app = OctopusToInflux(config_file, from_date, to_date)
-    app.run()
+    app = OctopusToInflux(config_file)
+    app.collect(from_date, to_date)
 
 
 if __name__ == '__main__':

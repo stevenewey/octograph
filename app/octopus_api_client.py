@@ -10,12 +10,13 @@ import requests
 
 
 class OctopusApiClient:
-    def __init__(self, api_prefix, api_key, resolution_minutes=30):
+    def __init__(self, api_prefix, api_key, resolution_minutes=30, cache_dir=None):
         if not api_key:
             raise click.ClickException('No Octopus API key provided')
         self._api_prefix = api_prefix
         self._api_key = api_key
         self._group_by = self._to_group_by(resolution_minutes)
+        self._cache_dir = cache_dir
 
     @staticmethod
     def _to_group_by(resolution: int):
@@ -44,20 +45,21 @@ class OctopusApiClient:
         else:
             url = f'{self._api_prefix}/{path}'
 
-        cache_directory = 'scratch/cache'
-        os.makedirs(cache_directory, exist_ok=True)
-        filename = self.__generate_cache_filename(url, args)
-        cache_path = os.path.join(cache_directory, f"{filename}.json")
-        if os.path.exists(cache_path):
-            with open(cache_path, 'r', encoding='utf-8') as file:
-                cached_data = json.load(file)
-            return cached_data
+        if self._cache_dir:
+            os.makedirs(self._cache_dir, exist_ok=True)
+            filename = self.__generate_cache_filename(url, args)
+            cache_path = os.path.join(self._cache_dir, f"{filename}.json")
+            if os.path.exists(cache_path):
+                with open(cache_path, 'r', encoding='utf-8') as file:
+                    cached_data = json.load(file)
+                return cached_data
 
         response = requests.get(url, params=args, auth=(self._api_key, ''))
         response.raise_for_status()
         json_data = response.json()
-        with open(cache_path, 'w', encoding='utf-8') as file:
-            json.dump(json_data, file)
+        if self._cache_dir:
+            with open(cache_path, 'w', encoding='utf-8') as file:
+                json.dump(json_data, file)
         return response.json()
 
     def _retrieve_paginated_data(self, path: str, from_date: str, to_date: str, page: str = None):
