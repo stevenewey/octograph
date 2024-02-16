@@ -38,7 +38,7 @@ class OctopusToInflux:
             config.get('octopus', 'api_prefix', fallback='https://api.octopus.energy/v1'),
             config.get('octopus', 'api_key'),
             self._resolution_minutes,
-            config.get('octopus', 'cache_dir', fallback='/tmp/octopus_api_cache') if config.getboolean('octopus', 'enable_cache') else None
+            config.get('octopus', 'cache_dir', fallback='/tmp/octopus_api_cache') if config.getboolean('octopus', 'enable_cache', fallback=False) else None
         )
 
         self._influx_bucket = config.get('influxdb', 'bucket', fallback='primary')
@@ -70,9 +70,14 @@ class OctopusToInflux:
 
     def collect(self, from_str: str, to_str: str):
         click.echo(f'Collecting data between {from_str} and {to_str}')
-        from_str = DateUtils.yesterday_date_string(self._timezone) if from_str == 'yesterday' else from_str
-        to_str = DateUtils.yesterday_date_string(self._timezone) if to_str == 'yesterday' else to_str
+        if from_str == 'yesterday':
+            from_str = DateUtils.yesterday_date_string(self._timezone)
+        if to_str == 'yesterday':
+            to_str = DateUtils.yesterday_date_string(self._timezone)
         collect_from = None if from_str == 'latest' else DateUtils.local_midnight(date.fromisoformat(from_str), self._timezone)
+
+        if to_str == 'tomorrow':
+            to_str = DateUtils.tomorrow_date_string(self._timezone)
         collect_to = DateUtils.local_midnight(date.fromisoformat(to_str) + timedelta(days=1), self._timezone)
 
         account = self._octopus_api.retrieve_account(self._account_number)
@@ -228,7 +233,7 @@ class OctopusToInflux:
                 },
                 'tags': {'tariff_code': standard_unit_rates[t]['tariff_code']} | base_tags,
             }, write_precision=WritePrecision.S)
-            for t in set(standard_unit_rates.keys()).union(standing_charges.keys())
+            for t in standard_unit_rates.keys()
         ]
         click.echo(len(points))
         self._influx_write.write(self._influx_bucket, record=points)
@@ -240,8 +245,8 @@ class OctopusToInflux:
     default="octograph.ini",
     type=click.Path(exists=True, dir_okay=True, readable=True),
 )
-@click.option('--from-date', default='yesterday', type=click.STRING)
-@click.option('--to-date', default='yesterday', type=click.STRING)
+@click.option('--from-date', default='latest', type=click.STRING)
+@click.option('--to-date', default='tomorrow', type=click.STRING)
 def cmd(config_file, from_date, to_date):
     app = OctopusToInflux(config_file)
     app.collect(from_date, to_date)
