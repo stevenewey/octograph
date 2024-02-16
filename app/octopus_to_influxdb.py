@@ -70,10 +70,10 @@ class OctopusToInflux:
 
     def collect(self, from_str: str, to_str: str):
         click.echo(f'Collecting data between {from_str} and {to_str}')
-        from_str = date.fromisoformat(DateUtils.yesterday_date_string(self._timezone)) if from_str == 'yesterday' else from_str
-        to_str = date.fromisoformat(DateUtils.yesterday_date_string(self._timezone)) if to_str == 'yesterday' else to_str
-        collect_from = None if from_str == 'latest' else DateUtils.local_midnight(from_str, self._timezone)
-        collect_to = DateUtils.local_midnight(to_str + timedelta(days=1), self._timezone)
+        from_str = DateUtils.yesterday_date_string(self._timezone) if from_str == 'yesterday' else from_str
+        to_str = DateUtils.yesterday_date_string(self._timezone) if to_str == 'yesterday' else to_str
+        collect_from = None if from_str == 'latest' else DateUtils.local_midnight(date.fromisoformat(from_str), self._timezone)
+        collect_to = DateUtils.local_midnight(date.fromisoformat(to_str) + timedelta(days=1), self._timezone)
 
         account = self._octopus_api.retrieve_account(self._account_number)
         tags = self._additional_tags.copy()
@@ -164,7 +164,7 @@ class OctopusToInflux:
                 },
                 'tags': {'tariff_code': standard_unit_rates[t]['tariff_code']} | base_tags,
             }, write_precision=WritePrecision.S))
-        click.echo(len(points))
+        click.echo(f'Storing {len(points)} points')
         self._influx_write.write(self._influx_bucket, record=points)
 
     def _process_gmp(self, gmp, collect_from: datetime, collect_to: datetime, base_tags: dict[str, str]):
