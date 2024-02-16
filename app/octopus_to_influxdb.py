@@ -108,6 +108,7 @@ class OctopusToInflux:
         click.echo(f'Processing electricity meter point: {emp["mpan"]}')
         if 'electricity_mpan' in self._included_tags:
             tags['electricity_mpan'] = emp["mpan"]
+
         if not collect_from:
             collect_from = self.find_latest_date('electricity_consumption', 'usage_kwh', tags) + timedelta(minutes=self._resolution_minutes)
         if DateUtils.minutes_between(collect_from, collect_to) < self._resolution_minutes:
@@ -177,7 +178,18 @@ class OctopusToInflux:
         click.echo(f'Processing gas meter point: {gmp["mprn"]}')
         if 'gas_mprn' in self._included_tags:
             tags['gas_mprn'] = gmp["mprn"]
-        click.echo(f'TODO: _store_gmp_pricing')
+
+        if not collect_from:
+            collect_from = self.find_latest_date('gas', 'usage_kwh', tags) + timedelta(minutes=self._resolution_minutes)
+        if DateUtils.minutes_between(collect_from, collect_to) < self._resolution_minutes:
+            click.echo('No new data to collect for GMP')
+            return
+
+        pricing_dict = self._get_pricing(gmp['agreements'], collect_from, collect_to)
+        standard_unit_rates = self._series_maker.make_series(pricing_dict['standard_unit_rates'])
+        standing_charges = self._series_maker.make_series(pricing_dict['standing_charges'])
+        self._store_gmp_pricing(standard_unit_rates, standing_charges, tags)
+
         for gm in gmp['meters']:
             if self._included_meters and gm['serial_number'] not in self._included_meters:
                 click.echo(f'Skipping gas meter {gm['serial_number']} as it is not in octopus.included_meters')
@@ -221,9 +233,15 @@ class OctopusToInflux:
         return pricing
 
     def _store_emp_pricing(self, standard_unit_rates, standing_charges, base_tags: dict[str, str]):
+        self._store_pricing('electricity_pricing', standard_unit_rates, standing_charges, base_tags)
+
+    def _store_gmp_pricing(self, standard_unit_rates, standing_charges, base_tags: dict[str, str]):
+        self._store_pricing('gas_pricing', standard_unit_rates, standing_charges, base_tags)
+
+    def _store_pricing(self, measurement: str, standard_unit_rates, standing_charges, base_tags: dict[str, str]):
         points = [
             Point.from_dict({
-                'measurement': 'electricity_pricing',
+                'measurement': measurement,
                 'time': t,
                 'fields': {
                     'unit_price_exc_vat_price': standard_unit_rates[t]['value_exc_vat'],
@@ -235,7 +253,7 @@ class OctopusToInflux:
             }, write_precision=WritePrecision.S)
             for t in standard_unit_rates.keys()
         ]
-        click.echo(len(points))
+        click.echo(f'Storing {len(points)} points')
         self._influx_write.write(self._influx_bucket, record=points)
 
 
