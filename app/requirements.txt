@@ -1,3 +1,0 @@
-requests >= 2.22.0
-influxdb-client == 1.40.0
-Click == 7.0
