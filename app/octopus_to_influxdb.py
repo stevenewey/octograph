@@ -70,9 +70,13 @@ class OctopusToInflux:
         f = f'r["_measurement"] == "{measurement}" and r._field == "{field}" {tf})'
         q = f'from(bucket: "{self._influx_bucket}") |> range(start: -30d) |> filter(fn: (r) => {f} |> last()'
         r = self._influx_query.query(q)
-        if len(r) != 1 or len(r[0].records) != 1:
+        l = None
+        for table in r:
+            for record in table.records:
+                l = record.values['_time'] if l is None or record.values['_time'] > l else l
+        if not l:
             raise click.ClickException(f'No data found for {measurement} in last 30 days - try back-filling')
-        return r[0].records[0].values['_time']
+        return l
 
     def collect(self, from_str: str, to_str: str):
         click.echo(f'Collecting data between {from_str} and {to_str}')
@@ -192,7 +196,7 @@ class OctopusToInflux:
             tags['gas_mprn'] = gmp["mprn"]
 
         if not collect_from:
-            collect_from = self.find_latest_date('gas', 'usage_kwh', tags) + timedelta(minutes=self._resolution_minutes)
+            collect_from = self.find_latest_date('gas_consumption', 'usage_kwh', tags) + timedelta(minutes=self._resolution_minutes)
         if DateUtils.minutes_between(collect_from, collect_to) < self._resolution_minutes:
             click.echo('No new data to collect for GMP')
             return
