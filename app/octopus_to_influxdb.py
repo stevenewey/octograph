@@ -31,6 +31,12 @@ class OctopusToInflux:
         low_end = config.getint('octopus', 'unit_rate_low_end', fallback=8)
         self._eco_unit_normaliser = EcoUnitNormaliser(self._timezone, low_start, low_end)
 
+        gas_meter_types = config.get('octopus', 'gas_meter_types', fallback=None)
+        self._gas_meter_types = dict(item.split('=') for item in gas_meter_types.split(',')) if gas_meter_types else {}
+        g_vcf = config.getfloat('octopus', 'volume_correction_factor', fallback=1.02264)
+        g_cv = config.getfloat('octopus', 'calorific_value', fallback=38.8)
+        self._smets2_conversion_multiplier = (g_vcf * g_cv) / 3.6
+
         self._resolution_minutes = config.getint('octopus', 'resolution_minutes', fallback=30)
         self._series_maker = SeriesMaker(self._resolution_minutes)
 
@@ -150,6 +156,12 @@ class OctopusToInflux:
         self._store_em_consumption(consumption, standard_unit_rates, standing_charges, tags)
 
     def _store_em_consumption(self, consumption: dict, standard_unit_rates, standing_charges, base_tags: [str, str]):
+        self._store_consumption('electricity_consumption', consumption, standard_unit_rates, standing_charges, base_tags)
+
+    def _store_gm_consumption(self, consumption: dict, standard_unit_rates, standing_charges, base_tags: [str, str]):
+        self._store_consumption('gas_consumption', consumption, standard_unit_rates, standing_charges, base_tags)
+
+    def _store_consumption(self, measurement: str, consumption: dict, standard_unit_rates, standing_charges, base_tags: [str, str]):
         points = []
         for t, c in consumption.items():
             usage_cost_exc_vat_pence = standard_unit_rates[t]['value_exc_vat'] * c['consumption']
@@ -157,7 +169,7 @@ class OctopusToInflux:
             standing_charge_cost_exc_vat_pence = standing_charges[t]['value_exc_vat'] / (60 * 24 / self._resolution_minutes)
             standing_charge_cost_inc_vat_pence = standing_charges[t]['value_inc_vat'] / (60 * 24 / self._resolution_minutes)
             points.append(Point.from_dict({
-                'measurement': 'electricity_consumption',
+                'measurement': measurement,
                 'time': t,
                 'fields': {
                     'usage_kwh': c['consumption'],
@@ -194,14 +206,20 @@ class OctopusToInflux:
             if self._included_meters and gm['serial_number'] not in self._included_meters:
                 click.echo(f'Skipping gas meter {gm['serial_number']} as it is not in octopus.included_meters')
             else:
-                self._process_gm(gm, collect_from, collect_to, tags)
+                self._process_gm(gmp["mprn"], gm, collect_from, collect_to, standard_unit_rates, standing_charges, tags)
 
-    def _process_gm(self, gm, collect_from: datetime, collect_to: datetime, base_tags: dict[str, str]):
+    def _process_gm(self, mprn: str, gm, collect_from: datetime, collect_to: datetime, standard_unit_rates, standing_charges, base_tags: dict[str, str]):
         tags = base_tags.copy()
         click.echo(f'Processing gas meter: {gm["serial_number"]}')
         if 'meter_serial_number' in self._included_tags:
             tags['meter_serial_number'] = gm["serial_number"]
-        click.echo(f'TODO: _store_gm_consumption')
+        last_interval_start = DateUtils.iso8601(collect_to - timedelta(minutes=self._resolution_minutes))
+        data = self._octopus_api.retrieve_gas_consumption(mprn, gm['serial_number'], DateUtils.iso8601(collect_from), last_interval_start)
+        if self._gas_meter_types.get(gm['serial_number'], 'SMETS1') == 'SMETS2':
+            for r in data:
+                r['consumption'] *= self._smets2_conversion_multiplier
+        consumption = self._series_maker.make_series(data)
+        self._store_gm_consumption(consumption, standard_unit_rates, standing_charges, tags)
 
     def _get_pricing(self, agreements, collect_from: datetime, collect_to: datetime):
         f = collect_from
