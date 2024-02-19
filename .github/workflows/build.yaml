@@ -26,8 +26,8 @@ jobs:
           type=schedule
           type=ref,event=branch
           type=ref,event=pr
-          type=semver,pattern=${{github.run_number}.${{github.run_attempt}}
-          type=sha            
+          type=semver,pattern=${{ github.run_number }}.${{ github.run_attempt }}
+          type=sha
     - name: Set up QEMU
       uses: docker/setup-qemu-action@v3
     - name: Set up Docker Buildx
