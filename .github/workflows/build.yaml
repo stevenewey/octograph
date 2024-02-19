@@ -2,9 +2,9 @@ name: Docker Image CI
 
 on:
   push:
-    branches: [ "main", "account_config" ]
+    branches: ["main"]
   pull_request:
-    branches: [ "main" ]
+    branches: ["main"]
 
 env:
   IMAGE_NAME: yansonb/octograph
@@ -44,5 +44,5 @@ jobs:
         context: .
         platforms: linux/amd64,linux/arm64
         push: true
-        tags: "${{ env.IMAGE_NAME }}:${{github.run_number}}.${{github.run_attempt}}"
+        tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
