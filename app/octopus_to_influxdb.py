@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import os
 from configparser import ConfigParser
 from datetime import datetime, date, timedelta
 
@@ -42,7 +43,7 @@ class OctopusToInflux:
 
         self._octopus_api = OctopusApiClient(
             config.get('octopus', 'api_prefix', fallback='https://api.octopus.energy/v1'),
-            config.get('octopus', 'api_key'),
+            os.getenv(config.get('octopus', 'api_key_env_var', fallback='OCTOGRAPH_OCTOPUS_API_KEY')),
             self._resolution_minutes,
             config.get('octopus', 'cache_dir', fallback='/tmp/octopus_api_cache') if config.getboolean('octopus', 'enable_cache', fallback=False) else None
         )
@@ -50,7 +51,7 @@ class OctopusToInflux:
         self._influx_bucket = config.get('influxdb', 'bucket', fallback='primary')
         influx_client = InfluxDBClient(
             url=config.get('influxdb', 'url', fallback='http://localhost:8086'),
-            token=config.get('influxdb', 'token', fallback=''),
+            token=os.getenv(config.get('influxdb', 'token_env_var', fallback='OCTOGRAPH_INFLUXDB_TOKEN')),
             org=config.get('influxdb', 'org', fallback='primary')
         )
         self._influx_write = influx_client.write_api(write_options=SYNCHRONOUS)
