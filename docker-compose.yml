@@ -11,7 +11,7 @@ services:
     - DOCKER_INFLUXDB_INIT_RETENTION=104w
     - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=secret_admin_token
     ports:
-      - "18086:8086"
+      - "28086:8086"
   grafana:
     image: grafana/grafana-oss:10.2.3
     ports:
