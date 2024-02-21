@@ -1,4 +1,0 @@
-requests >= 2.22.0
-influxdb == 5.2.3
-Click == 7.0
-maya == 0.6.1

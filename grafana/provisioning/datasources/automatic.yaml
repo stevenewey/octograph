@@ -1,0 +1,19 @@
+apiVersion: 1
+
+deleteDatasources:
+- name: InfluxDB
+  orgId: 1
+
+datasources:
+- name: InfluxDB
+  type: influxdb
+  access: proxy
+  url: http://influxdb:8086
+  jsonData:
+    version: InfluxQL
+    dbName: octopus-energy-metrics
+    httpMode: GET
+    httpHeaderName1: Authorization
+    tlsSkipVerify: false
+  secureJsonData:
+    httpHeaderValue1: 'Token secret_admin_token'
