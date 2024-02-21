@@ -1,11 +1,11 @@
 # Octograph
 
 Python tool for downloading energy consumption data from the
-`Octopus Energy API`_ and loading it into `InfluxDB`_.
+_Octopus Energy API_ and loading it into _InfluxDB_.
 
 If you think you'd find this useful, but haven't switched to Octopus yet, then
-you can follow my referrer link `<https://share.octopus.energy/wind-gecko-169>`_
-and you'll receive a £50 bill credit, and so will I :)
+you can follow my referrer link _https://share.octopus.energy/wind-gecko-169_.
+You'll receive a £50 bill credit, and so will I :-D
 
 Thanks to [stevenewey/octograph](https://github.com/stevenewey/octograph) for inspiration for this project,
 though there is very little left from the original codebase.
