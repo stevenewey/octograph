@@ -1,6 +1,10 @@
 Octograph
 ---------
 
+This is now hideously out of date and unloved by me. Instead, check out
+`<https://github.com/Yanson/octograph>`_ where Iain has overhauled, extended and
+improved it in every way!
+
 Python tool for downloading energy consumption data from the
 `Octopus Energy API`_ and loading it into `InfluxDB`_.
 
@@ -71,3 +75,4 @@ then be imported to review the data.
 .. _Octopus Energy Go: https://octopus.energy/go/
 .. _InfluxDB: https://www.influxdata.com/time-series-platform/influxdb/
 .. _Grafana: https://grafana.com
+-- _this fork: https://github.com/Yanson/octograph
