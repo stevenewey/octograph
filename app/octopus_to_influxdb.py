@@ -7,6 +7,8 @@ import click
 import maya
 import requests
 from influxdb import InfluxDBClient
+from influxdb_client import InfluxDBClient, Point
+from influxdb_client.client.write_api import SYNCHRONOUS
 
 
 def retrieve_paginated_data(
@@ -31,7 +33,7 @@ def retrieve_paginated_data(
     return results
 
 
-def store_series(connection, series, metrics, rate_data):
+def store_series(connection, version, org, bucket, series, metrics, rate_data):
 
     agile_data = rate_data.get('agile_unit_rates', [])
     agile_rates = {
@@ -131,8 +133,10 @@ def store_series(connection, series, metrics, rate_data):
         }
         for measurement in metrics
     ]
-    connection.write_points(measurements)
-
+    if (version == 2):
+        connection.write(bucket, org, measurements)
+    elif (version == 1):
+        connection.write_points(measurements)
 
 @click.command()
 @click.option(
@@ -147,13 +151,28 @@ def cmd(config_file, from_date, to_date):
     config = ConfigParser()
     config.read(config_file)
 
-    influx = InfluxDBClient(
-        host=config.get('influxdb', 'host', fallback="localhost"),
-        port=config.getint('influxdb', 'port', fallback=8086),
-        username=config.get('influxdb', 'user', fallback=""),
-        password=config.get('influxdb', 'password', fallback=""),
-        database=config.get('influxdb', 'database', fallback="energy"),
-    )
+    org=config.get('influxdb', 'org', fallback="")
+    database=config.get('influxdb', 'database', fallback="energy")
+    influx_version=(config.getint('influxdb', 'version', fallback=2))
+
+    if (influx_version == 2):
+        influx = InfluxDBClient(
+            url=config.get('influxdb', 'url', fallback="http://localhost:8086"),
+            token=config.get('influxdb', 'token', fallback=""),
+            org=org,
+        )
+        write_api = influx.write_api(write_options=SYNCHRONOUS)
+    elif (influx_version == 1):
+        influx = InfluxDBClient(
+            host=config.get('influxdb', 'host', fallback="localhost"),
+            port=config.getint('influxdb', 'port', fallback=8086),
+            username=config.get('influxdb', 'user', fallback=""),
+            password=config.get('influxdb', 'password', fallback=""),
+            database=database,
+        )
+        write_api = influx
+    else:
+        raise click.ClickException('Influx version not supported')
 
     api_key = config.get('octopus', 'api_key')
     if not api_key:
@@ -231,7 +250,7 @@ def cmd(config_file, from_date, to_date):
         api_key, agile_url, from_iso, to_iso
     )
     click.echo(f' {len(rate_data["electricity"]["agile_unit_rates"])} rates.')
-    store_series(influx, 'electricity', e_consumption, rate_data['electricity'])
+    store_series(write_api, influx_version, org, database, 'electricity', e_consumption, rate_data['electricity'])
 
     click.echo(
         f'Retrieving gas data for {from_iso} until {to_iso}...',
@@ -241,7 +260,7 @@ def cmd(config_file, from_date, to_date):
         api_key, g_url, from_iso, to_iso
     )
     click.echo(f' {len(g_consumption)} readings.')
-    store_series(influx, 'gas', g_consumption, rate_data['gas'])
+    store_series(write_api, influx_version, org, database, 'gas', g_consumption, rate_data['gas'])
 
 
 if __name__ == '__main__':
